@@ -1,0 +1,52 @@
+# ============================================================
+#  .gitignore for IEMOCAP Cross-Modal Attention Project
+# ============================================================
+
+# ── Virtual Environment ───────────────────────────────────────
+venv/
+env/
+.env/
+.venv/
+
+# ── Python cache ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Dataset — raw IEMOCAP files (too large for git) ──────────
+data/raw/
+
+# ── Processed embeddings (.npy files, can be hundreds of GB) ─
+data/processed/
+
+# ── Split files (auto-generated, no need to track) ───────────
+data/splits/
+
+# ── Trained model checkpoints (large binary files) ───────────
+checkpoints/
+
+# ── Logs and output plots ─────────────────────────────────────
+logs/
+
+# ── Jupyter Notebooks checkpoints ────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── VS Code settings ──────────────────────────────────────────
+.vscode/
+
+# ── OS files ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Hugging Face model cache (downloaded models) ─────────────
+.cache/
+~/.cache/huggingface/
+
+# ── Temporary files ───────────────────────────────────────────
+*.tmp
+*.log
+*.bak
