@@ -1,20 +1,15 @@
 # evaluate.py
 # ============================================================
-#  Final Evaluation Script
+#  ET-TACFN Final Evaluation
 #
-#  ⚠️  Run this ONLY ONCE — after training is complete.
-#     Never use test results to change your model/settings.
+#  ⚠️  Run ONCE after training is complete.
 #
-#  What it does:
-#    • Loads best_model.pt from checkpoints/
-#    • Runs on test set (Session 5 only)
-#    • Prints:
-#        WA  = Weighted Accuracy   (standard metric)
-#        UA  = Unweighted Accuracy (mean per-class, handles imbalance)
-#        F1  = Macro F1-score
-#        Per-class precision/recall/F1
-#    • Saves confusion matrix → logs/confusion_matrix.png
-#    • Saves results text    → logs/test_results.txt
+#  Outputs:
+#    • WA, UA, Macro F1
+#    • Per-class precision / recall / F1
+#    • Confusion matrix PNG
+#    • Confidence scores per modality (ET-TACFN analysis)
+#    • All saved to logs/
 #
 #  Run:  python evaluate.py
 # ============================================================
@@ -33,7 +28,6 @@ from tqdm import tqdm
 from dataset.iemocap_dataset import IEMOCAPDataset, collate_fn
 from models.classifier import MultimodalEmotionModel
 
-# ── Config ────────────────────────────────────────────────────
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
 
@@ -53,31 +47,22 @@ VISUAL_DIR = os.path.join(cfg["data"]["processed_dir"], "visual_embeddings")
 
 test_set = IEMOCAPDataset("test", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
 test_loader = DataLoader(
-    test_set,
-    batch_size  = cfg["training"]["batch_size"],
-    shuffle     = False,
-    collate_fn  = collate_fn,
-    num_workers = 0
-)
+    test_set, batch_size=cfg["training"]["batch_size"],
+    shuffle=False, collate_fn=collate_fn, num_workers=0)
 
 # ── Load model ────────────────────────────────────────────────
-print(f"\n🤖  Loading model from: {CKPT_PATH}")
-if not os.path.exists(CKPT_PATH):
-    raise FileNotFoundError(
-        f"Checkpoint not found at {CKPT_PATH}\n"
-        f"Run 'python train.py' first!"
-    )
-
+print(f"\n🤖  Loading ET-TACFN from: {CKPT_PATH}")
 checkpoint = torch.load(CKPT_PATH, map_location=DEVICE)
 model      = MultimodalEmotionModel(cfg).to(DEVICE)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
-print(f"    Loaded checkpoint from epoch {checkpoint['epoch']} "
-      f"(val_acc = {checkpoint['val_acc']*100:.2f}%)")
+print(f"     Checkpoint: epoch {checkpoint['epoch']}, "
+      f"val_acc={checkpoint['val_acc']*100:.2f}%")
 
-# ── Run inference on test set ─────────────────────────────────
-print(f"\n⚙️   Running inference on {len(test_set)} test utterances...")
+# ── Inference ─────────────────────────────────────────────────
+print(f"\n⚙️   Running inference on {len(test_set)} utterances...")
 all_preds, all_labels = [], []
+all_conf_t, all_conf_a, all_conf_v = [], [], []
 
 with torch.no_grad():
     for batch in tqdm(test_loader, desc="  Testing"):
@@ -89,72 +74,94 @@ with torch.no_grad():
         a_mask = batch["audio_mask"].to(DEVICE)
         v_mask = batch["visual_mask"].to(DEVICE)
 
-        logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask)
-        preds     = logits.argmax(dim=-1)
+        logits, info = model(text, audio, visual, t_mask, a_mask, v_mask)
+        preds        = logits.argmax(dim=-1)
 
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
 
+        # Collect confidence scores (ET-TACFN analysis)
+        if "text_conf" in info:
+            all_conf_t.extend(info["text_conf"].squeeze(-1).numpy())
+            all_conf_a.extend(info["audio_conf"].squeeze(-1).numpy())
+            all_conf_v.extend(info["visual_conf"].squeeze(-1).numpy())
+
 all_preds  = np.array(all_preds)
 all_labels = np.array(all_labels)
 
-# ── Compute metrics ───────────────────────────────────────────
+# ── Metrics ───────────────────────────────────────────────────
 wa = accuracy_score(all_labels, all_preds)
-ua = balanced_accuracy_score(all_labels, all_preds)   # mean per-class accuracy
+ua = balanced_accuracy_score(all_labels, all_preds)
 f1 = f1_score(all_labels, all_preds, average="macro")
 
 print("\n" + "=" * 57)
-print("  TEST RESULTS — IEMOCAP Session 5")
+print("  ET-TACFN TEST RESULTS — IEMOCAP Session 5")
 print("=" * 57)
 print(f"  Weighted Accuracy   (WA) : {wa*100:.2f}%")
 print(f"  Unweighted Accuracy (UA) : {ua*100:.2f}%")
 print(f"  Macro F1-Score           : {f1*100:.2f}%")
 print("=" * 57)
 print("\n  Per-class breakdown:")
-print(classification_report(
-    all_labels, all_preds,
-    target_names=EMOTION_NAMES,
-    digits=4
-))
+print(classification_report(all_labels, all_preds,
+                             target_names=EMOTION_NAMES, digits=4))
 
-# ── Confusion matrix ──────────────────────────────────────────
+# ── Confidence Analysis (ET-TACFN specific) ───────────────────
+if all_conf_t:
+    print("  Average Modality Confidence Scores:")
+    print(f"    Text   : {np.mean(all_conf_t):.3f}")
+    print(f"    Audio  : {np.mean(all_conf_a):.3f}")
+    print(f"    Visual : {np.mean(all_conf_v):.3f}")
+    print("  (Higher = model trusted this modality more on average)")
+
+# ── Confusion Matrix ──────────────────────────────────────────
 cm      = confusion_matrix(all_labels, all_preds)
 cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-            xticklabels=EMOTION_NAMES, yticklabels=EMOTION_NAMES,
-            ax=axes[0])
+            xticklabels=EMOTION_NAMES, yticklabels=EMOTION_NAMES, ax=axes[0])
 axes[0].set_title("Confusion Matrix (Counts)")
-axes[0].set_ylabel("True Label")
-axes[0].set_xlabel("Predicted Label")
+axes[0].set_ylabel("True")
+axes[0].set_xlabel("Predicted")
 
 sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues",
-            xticklabels=EMOTION_NAMES, yticklabels=EMOTION_NAMES,
-            ax=axes[1])
+            xticklabels=EMOTION_NAMES, yticklabels=EMOTION_NAMES, ax=axes[1])
 axes[1].set_title("Confusion Matrix (Normalized)")
-axes[1].set_ylabel("True Label")
-axes[1].set_xlabel("Predicted Label")
+axes[1].set_ylabel("True")
+axes[1].set_xlabel("Predicted")
 
 plt.suptitle(
-    f"IEMOCAP Test — WA: {wa*100:.2f}%   UA: {ua*100:.2f}%   F1: {f1*100:.2f}%",
-    fontsize=13, fontweight="bold"
-)
+    f"ET-TACFN — WA: {wa*100:.2f}%   UA: {ua*100:.2f}%   F1: {f1*100:.2f}%",
+    fontsize=13, fontweight="bold")
 plt.tight_layout()
 
 cm_path = os.path.join(LOG_DIR, "confusion_matrix.png")
 plt.savefig(cm_path, dpi=150, bbox_inches="tight")
-print(f"  📊  Confusion matrix saved → {cm_path}")
+print(f"\n  📊  Confusion matrix → {cm_path}")
 
-# ── Save text results ─────────────────────────────────────────
+# ── Modality Confidence Plot ──────────────────────────────────
+if all_conf_t:
+    fig2, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(["Text", "Audio", "Visual"],
+           [np.mean(all_conf_t), np.mean(all_conf_a), np.mean(all_conf_v)],
+           color=["steelblue", "coral", "seagreen"])
+    ax.set_title("ET-TACFN: Average Confidence Gate per Modality")
+    ax.set_ylabel("Confidence Score (0–1)")
+    ax.set_ylim(0, 1)
+    conf_path = os.path.join(LOG_DIR, "confidence_scores.png")
+    plt.tight_layout()
+    plt.savefig(conf_path, dpi=150, bbox_inches="tight")
+    print(f"  📊  Confidence plot   → {conf_path}")
+
+# ── Save results text ─────────────────────────────────────────
 results_path = os.path.join(LOG_DIR, "test_results.txt")
 with open(results_path, "w") as f:
-    f.write("IEMOCAP Test Results (Session 5)\n")
-    f.write("=" * 40 + "\n")
+    f.write("ET-TACFN Test Results (IEMOCAP Session 5)\n")
+    f.write("=" * 45 + "\n")
     f.write(f"WA  : {wa*100:.2f}%\n")
     f.write(f"UA  : {ua*100:.2f}%\n")
     f.write(f"F1  : {f1*100:.2f}%\n\n")
     f.write(classification_report(all_labels, all_preds,
                                   target_names=EMOTION_NAMES))
-print(f"  📄  Results saved         → {results_path}\n")
+print(f"  📄  Results text      → {results_path}\n")

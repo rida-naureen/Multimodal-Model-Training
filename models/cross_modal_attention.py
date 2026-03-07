@@ -1,28 +1,18 @@
 # models/cross_modal_attention.py
 # ============================================================
-#  Cross-Modal Attention (CMA) — the CORE of this project
+#  Cross-Modal Attention (CMA) Module
 #
-#  WHAT IS CROSS-MODAL ATTENTION?
-#  --------------------------------
-#  Imagine you're reading a transcript of someone saying "I'm fine."
-#  With text alone you'd think they're OK.
-#  But if you also hear their voice (shaky, low) and see their face
-#  (looking down, no eye contact), you understand they're actually sad.
+#  Allows modality A to attend to modality B:
+#    Query (Q) = modality A (what we want to enrich)
+#    Key   (K) = modality B (index of what B contains)
+#    Value (V) = modality B (actual content of B)
 #
-#  Cross-Modal Attention lets modality A "ask questions" of modality B:
-#    Text  asks Audio:  "Is this part of the audio relevant to what was said?"
-#    Text  asks Visual: "Does the face match the sentiment of the words?"
-#    Audio asks Text:   "Does the transcript clarify this vocal pattern?"
+#    Attention = softmax(Q·Kᵀ / √d) · V
 #
-#  HOW IT WORKS (Q, K, V):
-#  ------------------------
-#    Query (Q)  = what modality A wants to know
-#    Key   (K)  = index of what modality B contains
-#    Value (V)  = actual content of modality B
-#
-#    Attention = softmax(Q · Kᵀ / √d) · V
-#
-#    Result: modality A features, enriched with relevant info from B
+#  ET-TACFN uses ALL 6 directions (vs 3 in the old version):
+#    Text  ← Audio   Text  ← Visual
+#    Audio ← Text    Audio ← Visual   ← NEW
+#    Visual← Text    Visual← Audio    ← NEW
 # ============================================================
 
 import torch
@@ -31,83 +21,65 @@ import torch.nn as nn
 
 class CrossModalAttention(nn.Module):
     """
-    One cross-modal attention block.
+    Single cross-modal attention block.
 
     Args:
-        d_model   : feature dimension (both modalities must be this size)
-        num_heads : how many parallel attention heads (more = richer)
-        dropout   : regularization to prevent overfitting
+        d_model   : shared feature dimension
+        num_heads : attention heads
+        dropout   : dropout rate
 
     Input:
-        query_mod : [B, T_q,  d_model]  modality to enrich (e.g. text)
-        kv_mod    : [B, T_kv, d_model]  source modality    (e.g. audio)
-        key_mask  : [B, T_kv] bool      True = padded, ignore this position
+        query_mod : [B, T_q,  d_model]  modality to enrich
+        kv_mod    : [B, T_kv, d_model]  source modality
+        key_mask  : [B, T_kv] bool      True = padded, ignore
 
     Output:
-        out          : [B, T_q, d_model]  query enriched by source
-        attn_weights : [B, num_heads, T_q, T_kv]  (for visualization)
+        out          : [B, T_q, d_model]  enriched query modality
+        attn_weights : attention weights (for visualization)
     """
 
-    def __init__(self, d_model=256, num_heads=4, dropout=0.1):
+    def __init__(self, d_model=512, num_heads=8, dropout=0.1):
         super().__init__()
-
-        # PyTorch's built-in multi-head attention
         self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True    # expects [Batch, Time, Features]
+            embed_dim   = d_model,
+            num_heads   = num_heads,
+            dropout     = dropout,
+            batch_first = True
         )
-
         self.norm1   = nn.LayerNorm(d_model)
         self.norm2   = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-
-        # Small feed-forward network to transform attended features
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),  # expand
-            nn.GELU(),                         # activation
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model * 4, d_model),  # contract back
+            nn.Linear(d_model * 4, d_model),
             nn.Dropout(dropout)
         )
 
     def forward(self, query_mod, kv_mod, key_mask=None):
-        # ── Cross-attention: Q from query_mod, K/V from kv_mod ──
         attended, attn_weights = self.attn(
-            query=query_mod,
-            key=kv_mod,
-            value=kv_mod,
-            key_padding_mask=key_mask,   # ignore padded positions
-            average_attn_weights=False   # keep per-head weights
+            query            = query_mod,
+            key              = kv_mod,
+            value            = kv_mod,
+            key_padding_mask = key_mask,
+            average_attn_weights = False
         )
-
-        # ── Residual connection + LayerNorm ──────────────────────
-        # "Residual" = add original input back, so we don't lose it
         x = self.norm1(query_mod + self.dropout(attended))
-
-        # ── Feed-forward + another residual ──────────────────────
         x = self.norm2(x + self.ffn(x))
-
         return x, attn_weights
 
 
 class ModalityProjector(nn.Module):
     """
-    Projects a modality's features to the shared d_model dimension.
+    Projects modality features to shared d_model dimension.
 
-    Why needed:
-      Text  features = 768-dim  (from RoBERTa)
-      Audio features = 768-dim  (from Wav2Vec2)
-      Visual features= 256-dim  (from ResNet, already projected)
-      → All need to be the same size for attention to work.
-
-    Args:
-        input_dim : original feature size
-        d_model   : target size (same for all modalities)
+    Text  : 768 → d_model
+    Audio : 768 → d_model
+    Visual: 256 → d_model
     """
 
-    def __init__(self, input_dim, d_model=256, dropout=0.1):
+    def __init__(self, input_dim, d_model=512, dropout=0.1):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(input_dim, d_model),
@@ -117,5 +89,5 @@ class ModalityProjector(nn.Module):
         )
 
     def forward(self, x):
-        # x: [B, T, input_dim]  →  [B, T, d_model]
+        # x: [B, T, input_dim] → [B, T, d_model]
         return self.proj(x)

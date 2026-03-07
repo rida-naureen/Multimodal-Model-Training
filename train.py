@@ -1,20 +1,17 @@
 # train.py
 # ============================================================
-#  Training Script
+#  ET-TACFN Training Script
 #
-#  What it does:
-#    1. Loads train + val datasets from data/processed/
-#    2. Builds the MultimodalEmotionModel
-#    3. Trains for up to 30 epochs
-#    4. Saves the BEST model to checkpoints/best_model.pt
-#    5. Logs results to logs/training_log.csv
-#    6. Stops early if val accuracy doesn't improve (patience=5)
+#  Key improvements over baseline:
+#    • Weighted cross-entropy loss  (handles class imbalance)
+#    • Label smoothing 0.1          (prevents overconfidence)
+#    • Separate LRs: encoders get smaller LR than fusion layers
+#    • OneCycleLR scheduler with warmup
+#    • Gradient clipping
+#    • Early stopping (patience=7)
+#    • Saves best model + training log
 #
 #  Run:  python train.py
-#
-#  After training:
-#    python plot_training.py  ← see loss/accuracy curves
-#    python evaluate.py       ← test on Session 5
 # ============================================================
 
 import os
@@ -22,7 +19,9 @@ import csv
 import yaml
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader
+from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 
 from dataset.iemocap_dataset import IEMOCAPDataset, collate_fn
@@ -32,11 +31,10 @@ from models.classifier import MultimodalEmotionModel
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
 
-# ── Device: use GPU if available, else CPU ────────────────────
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"\n🖥️   Using device: {DEVICE}")
+print(f"\n🖥️   Device : {DEVICE}")
 if DEVICE.type == "cuda":
-    print(f"     GPU: {torch.cuda.get_device_name(0)}")
+    print(f"     GPU    : {torch.cuda.get_device_name(0)}")
 
 # ── Paths ─────────────────────────────────────────────────────
 SPLITS_DIR = cfg["data"]["splits_dir"]
@@ -54,57 +52,84 @@ train_set = IEMOCAPDataset("train", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
 val_set   = IEMOCAPDataset("val",   SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
 
 train_loader = DataLoader(
-    train_set,
-    batch_size  = cfg["training"]["batch_size"],
-    shuffle     = True,    # shuffle train every epoch
-    collate_fn  = collate_fn,
-    num_workers = 0        # Windows: keep at 0
-)
+    train_set, batch_size=cfg["training"]["batch_size"],
+    shuffle=True, collate_fn=collate_fn, num_workers=0)
 val_loader = DataLoader(
-    val_set,
-    batch_size  = cfg["training"]["batch_size"],
-    shuffle     = False,   # don't shuffle val/test
-    collate_fn  = collate_fn,
-    num_workers = 0
+    val_set, batch_size=cfg["training"]["batch_size"],
+    shuffle=False, collate_fn=collate_fn, num_workers=0)
+
+# ── Weighted Loss (handles class imbalance) ───────────────────
+# Rare emotions (Happy, Angry) get higher penalty when wrong
+print("\n⚖️   Computing class weights for imbalanced classes...")
+all_labels = [
+    train_set.label_map[uid]
+    for uid in train_set.utt_ids
+]
+# Convert emotion strings to integers
+from dataset.iemocap_dataset import EMOTION_TO_IDX
+label_ints = [EMOTION_TO_IDX[e] for e in all_labels]
+
+class_weights = compute_class_weight(
+    class_weight = "balanced",
+    classes      = np.array([0, 1, 2, 3]),
+    y            = np.array(label_ints)
+)
+weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+print(f"     Class weights: { {['hap','sad','ang','neu'][i]: round(w,3) for i,w in enumerate(class_weights)} }")
+
+# Label smoothing (0.1) + class weights combined
+criterion = nn.CrossEntropyLoss(
+    weight         = weights_tensor,
+    label_smoothing= cfg["training"]["label_smoothing"]
 )
 
 # ── Model ─────────────────────────────────────────────────────
-print("\n🤖  Building model...")
+print("\n🤖  Building ET-TACFN model...")
 model = MultimodalEmotionModel(cfg).to(DEVICE)
 
 n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"    Trainable parameters: {n_params:,}")
+print(f"     Trainable parameters: {n_params:,}")
 
-# ── Loss function ─────────────────────────────────────────────
-# CrossEntropyLoss = measures how wrong the predictions are
-criterion = nn.CrossEntropyLoss()
+# ── Optimizer — separate LRs for encoders vs fusion ──────────
+# Pretrained encoder layers get much smaller LR to avoid forgetting
+fusion_params  = []
+encoder_params = []
 
-# ── Optimizer: AdamW (Adam + weight decay) ────────────────────
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr           = cfg["training"]["lr"],
-    weight_decay = cfg["training"]["weight_decay"]
-)
+for name, param in model.named_parameters():
+    if not param.requires_grad:
+        continue
+    # Identify encoder layers by name patterns
+    if any(k in name for k in ["text_proj", "audio_proj", "visual_proj",
+                                 "roberta", "wav2vec", "resnet"]):
+        encoder_params.append(param)
+    else:
+        fusion_params.append(param)
 
-# ── Scheduler: gradually reduce LR during training ───────────
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+optimizer = torch.optim.AdamW([
+    {"params": fusion_params,  "lr": cfg["training"]["lr"]},
+    {"params": encoder_params, "lr": cfg["training"]["encoder_lr"]}
+], weight_decay=cfg["training"]["weight_decay"])
+
+# ── OneCycleLR with warmup ─────────────────────────────────────
+EPOCHS = cfg["training"]["epochs"]
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
     optimizer,
-    T_max = cfg["training"]["epochs"]
+    max_lr          = [cfg["training"]["lr"], cfg["training"]["encoder_lr"]],
+    steps_per_epoch = len(train_loader),
+    epochs          = EPOCHS,
+    pct_start       = 0.1    # 10% of training = warmup phase
 )
 
-# ── One epoch of training or validation ───────────────────────
+# ── Training / Validation loop ────────────────────────────────
 def run_epoch(loader, is_train):
     model.train() if is_train else model.eval()
     total_loss, correct, total = 0.0, 0, 0
 
-    # torch.no_grad() skips gradient calculation during validation
-    # (faster + less memory)
     with torch.set_grad_enabled(is_train):
         for batch in tqdm(loader,
                           desc="  Train" if is_train else "  Val  ",
                           leave=False):
 
-            # Move data to GPU/CPU
             text   = batch["text"].to(DEVICE)
             audio  = batch["audio"].to(DEVICE)
             visual = batch["visual"].to(DEVICE)
@@ -113,20 +138,17 @@ def run_epoch(loader, is_train):
             a_mask = batch["audio_mask"].to(DEVICE)
             v_mask = batch["visual_mask"].to(DEVICE)
 
-            # Forward pass: compute predictions
             logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask)
-
-            # Compute loss
-            loss = criterion(logits, labels)
+            loss      = criterion(logits, labels)
 
             if is_train:
-                optimizer.zero_grad()     # clear old gradients
-                loss.backward()           # compute new gradients
-                # Clip gradients: prevents exploding gradients
+                optimizer.zero_grad()
+                loss.backward()
+                # Gradient clipping — prevents exploding gradients
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()          # update weights
+                optimizer.step()
+                scheduler.step()
 
-            # Track metrics
             total_loss += loss.item() * labels.size(0)
             preds       = logits.argmax(dim=-1)
             correct    += (preds == labels).sum().item()
@@ -135,23 +157,19 @@ def run_epoch(loader, is_train):
     return total_loss / total, correct / total
 
 
-# ── Main training loop ────────────────────────────────────────
-EPOCHS   = cfg["training"]["epochs"]
-PATIENCE = cfg["training"]["patience"]
+# ── Main loop ─────────────────────────────────────────────────
+PATIENCE  = cfg["training"]["patience"]
 CKPT_PATH = os.path.join(CKPT_DIR, "best_model.pt")
 
-print(f"\n🚀  Training for up to {EPOCHS} epochs "
-      f"(early stop patience = {PATIENCE})\n")
+print(f"\n🚀  Training ET-TACFN for up to {EPOCHS} epochs\n")
 
-best_val_acc    = 0.0
+best_val_acc     = 0.0
 patience_counter = 0
 log_rows         = []
 
 for epoch in range(1, EPOCHS + 1):
-
     train_loss, train_acc = run_epoch(train_loader, is_train=True)
     val_loss,   val_acc   = run_epoch(val_loader,   is_train=False)
-    scheduler.step()
 
     lr = optimizer.param_groups[0]["lr"]
     print(f"Epoch {epoch:02d}/{EPOCHS}  |  "
@@ -168,25 +186,24 @@ for epoch in range(1, EPOCHS + 1):
         "lr"        : round(lr,         8)
     })
 
-    # Save best model
     if val_acc > best_val_acc:
         best_val_acc     = val_acc
         patience_counter = 0
         torch.save({
-            "epoch"             : epoch,
-            "model_state_dict"  : model.state_dict(),
+            "epoch"              : epoch,
+            "model_state_dict"   : model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "val_acc"           : val_acc,
-            "cfg"               : cfg
+            "val_acc"            : val_acc,
+            "cfg"                : cfg
         }, CKPT_PATH)
-        print(f"  ✅  Best model saved  (val_acc = {val_acc*100:.2f}%)")
+        print(f"  ✅  Best model saved  (val_acc={val_acc*100:.2f}%)")
     else:
         patience_counter += 1
         if patience_counter >= PATIENCE:
-            print(f"\n⏹️   Early stopping: no improvement for {PATIENCE} epochs")
+            print(f"\n⏹️   Early stopping at epoch {epoch}")
             break
 
-# ── Save training log ─────────────────────────────────────────
+# ── Save log ──────────────────────────────────────────────────
 log_path = os.path.join(LOG_DIR, "training_log.csv")
 with open(log_path, "w", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
@@ -196,9 +213,7 @@ with open(log_path, "w", newline="") as f:
 print(f"\n{'='*55}")
 print(f"  ✅  Training complete!")
 print(f"  Best val accuracy : {best_val_acc*100:.2f}%")
-print(f"  Model saved to    : {CKPT_PATH}")
-print(f"  Log saved to      : {log_path}")
-print(f"\n  Next steps:")
-print(f"    python plot_training.py   ← visualize training curves")
-print(f"    python evaluate.py        ← test on Session 5")
+print(f"  Model saved       : {CKPT_PATH}")
+print(f"  Log saved         : {log_path}")
+print(f"\n  Next → python evaluate.py")
 print(f"{'='*55}\n")

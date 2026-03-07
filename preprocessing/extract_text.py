@@ -1,19 +1,22 @@
 # preprocessing/extract_text.py
 # ============================================================
-#  STEP 3A — Extract TEXT features using RoBERTa
+#  STEP 3A — Extract TEXT features using RoBERTa-base
 #
-#  What it does:
-#    • Reads transcription .txt files (what was said)
-#    • Passes each utterance through RoBERTa-base
-#    • Saves embedding as .npy file:
-#        data/processed/text_embeddings/Ses01F_impro01_F000.npy
-#        shape: [seq_len, 768]
+#  Reads: dialog/transcriptions/Ses01F_impro01.txt
 #
-#  Time: ~20–30 minutes for all 5 sessions
-#  Run:  python preprocessing/extract_text.py
+#  Transcript file format:
+#    Ses01F_impro01_F000 [6.29-8.23]: I had fun.
+#    Ses01F_impro01_M001 [9.10-10.5]: Me too.
+#
+#  Saves: data/processed/text_embeddings/Ses01F_impro01_F000.npy
+#         shape: [seq_len, 768]
+#
+#  Time: ~20–30 min for all sessions
+#  Run:  python preprocessing\extract_text.py
 # ============================================================
 
 import os
+import re
 import numpy as np
 import torch
 from transformers import RobertaTokenizer, RobertaModel
@@ -21,87 +24,82 @@ from tqdm import tqdm
 
 RAW_DIR    = "data/raw"
 OUTPUT_DIR = "data/processed/text_embeddings"
-MAX_LEN    = 128   # max token length per utterance
+MAX_LEN    = 128
 
-# ── Load RoBERTa (downloads ~500MB on first run) ──────────────
-print("\n  Loading RoBERTa-base...")
+print("\n  Loading RoBERTa-base (downloads ~500MB first time)...")
 tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
 model     = RobertaModel.from_pretrained("roberta-base")
 model.eval()
 
-# Use GPU if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model  = model.to(device)
-print(f"  Using device: {device}")
+print(f"  Device: {device}")
 
 
-def extract_for_utterance(text):
-    """
-    text (str) → embedding numpy array [seq_len, 768]
-    """
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        max_length=MAX_LEN,
-        padding="max_length"
-    )
+def embed_text(text):
+    """text → numpy [seq_len, 768]"""
+    inputs = tokenizer(text, return_tensors="pt", truncation=True,
+                       max_length=MAX_LEN, padding="max_length")
     inputs = {k: v.to(device) for k, v in inputs.items()}
-
     with torch.no_grad():
-        outputs = model(**inputs)
-
-    # last_hidden_state: [1, seq_len, 768] → [seq_len, 768]
-    return outputs.last_hidden_state.squeeze(0).cpu().numpy()
+        out = model(**inputs)
+    return out.last_hidden_state.squeeze(0).cpu().numpy()  # [128, 768]
 
 
 def extract_all():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    total_saved = 0
+    saved = skipped = 0
 
     for session_num in range(1, 6):
-        session    = f"Session{session_num}"
-        trans_dir  = os.path.join(RAW_DIR, session, "dialog", "transcriptions")
-
+        trans_dir = os.path.join(RAW_DIR, f"Session{session_num}",
+                                 "dialog", "transcriptions")
         if not os.path.exists(trans_dir):
-            print(f"  ⚠️   {session}: transcriptions/ not found, skipping")
+            print(f"  ⚠️  Session{session_num}: transcriptions/ not found")
             continue
 
-        files = [f for f in os.listdir(trans_dir) if f.endswith(".txt")]
-        print(f"\n  {session} — {len(files)} transcription files")
+        files = [f for f in os.listdir(trans_dir)
+                 if f.endswith(".txt") and not f.startswith("._")]
+        print(f"\n  Session{session_num} — {len(files)} transcript files")
 
-        for fname in tqdm(files, desc=f"  {session}"):
+        for fname in tqdm(files, desc=f"  Ses0{session_num}"):
             fpath = os.path.join(trans_dir, fname)
-            with open(fpath, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("//"):
-                        continue
+            try:
+                with open(fpath, encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
 
-                    # Line format:
-                    # Ses01F_impro01_F000 [0.00-1.50]: Hello there
-                    try:
-                        header, text = line.split(":", 1)
-                        utt_id = header.split(" ")[0].strip()
-                        text   = text.strip()
-                    except ValueError:
-                        continue
+            for line in lines:
+                line = line.strip()
+                # Format: SesXXX_dialog_F000 [start-end]: text here
+                # Also accept lines without timestamp
+                match = re.match(
+                    r'^(Ses\d+[FM]_\S+)\s*(?:\[[\d\.\-]+\])?\s*:\s*(.+)$',
+                    line)
+                if not match:
+                    continue
 
-                    if not text or not utt_id:
-                        continue
+                utt_id = match.group(1).strip()
+                text   = match.group(2).strip()
+                if not text:
+                    continue
 
-                    save_path = os.path.join(OUTPUT_DIR, f"{utt_id}.npy")
-                    if os.path.exists(save_path):
-                        continue   # skip already extracted
+                save_path = os.path.join(OUTPUT_DIR, f"{utt_id}.npy")
+                if os.path.exists(save_path):
+                    skipped += 1
+                    continue
 
-                    embedding = extract_for_utterance(text)
-                    np.save(save_path, embedding)
-                    total_saved += 1
+                try:
+                    emb = embed_text(text)
+                    np.save(save_path, emb)
+                    saved += 1
+                except Exception as e:
+                    print(f"\n  ⚠️  {utt_id}: {e}")
 
-    print(f"\n  ✅  Text extraction complete: {total_saved} files saved")
-    print(f"      Location: {OUTPUT_DIR}")
+    print(f"\n  ✅  Text done: {saved} saved, {skipped} already existed")
+    print(f"      → {OUTPUT_DIR}")
     print("\n  Run next:")
-    print("      python preprocessing/extract_audio.py\n")
+    print("      python preprocessing\\extract_audio.py\n")
 
 
 if __name__ == "__main__":

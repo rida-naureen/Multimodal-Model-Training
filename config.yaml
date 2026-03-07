@@ -1,31 +1,45 @@
 # ============================================================
-#  config.yaml  —  ALL settings for the project in one place
-#  Change values here instead of editing Python files
+#  config.yaml — ET-TACFN Project Settings
+#  Enhanced Trimodal Adaptive Cross-Modal Fusion Network
 # ============================================================
 
 data:
   raw_dir:       "data/raw"
   processed_dir: "data/processed"
   splits_dir:    "data/splits"
-  test_session:  5          # Session 5 is always the test set
-  val_ratio:     0.1        # 10% of train sessions → validation
+  test_session:  5
+  val_ratio:     0.1
   emotions:      ["hap", "sad", "ang", "neu"]
 
 model:
-  d_model:          256   # shared hidden dimension across all modalities
-  num_heads:        4     # attention heads (d_model must be divisible by this)
+  # Shared dimension — increased from 256 to 512 for ET-TACFN
+  d_model:          512
+  num_heads:        8        # must divide d_model evenly
   dropout:          0.1
-  num_classes:      4     # happy, sad, angry, neutral
-  text_input_dim:   768   # RoBERTa-base output size
-  audio_input_dim:  768   # Wav2Vec2-base output size
-  visual_input_dim: 256   # ResNet-50 projected output size
+  num_classes:      4        # happy, sad, angry, neutral
+
+  # Input dims from pretrained encoders
+  text_input_dim:   768      # RoBERTa-base
+  audio_input_dim:  768      # Wav2Vec2-base
+  visual_input_dim: 256      # ResNet-50 projected
+
+  # ET-TACFN specific settings
+  use_intra_modal_attn:  true   # Contribution 1
+  use_confidence_gate:   true   # Contribution 2
+  use_hierarchical:      true   # Contribution 3
+  use_missing_modality:  true   # Contribution 4
 
 training:
-  batch_size:   16
-  epochs:       30
-  lr:           0.0001
-  weight_decay: 0.00001
-  patience:     5         # stop early if val acc doesn't improve for 5 epochs
+  batch_size:         16
+  epochs:             40        # more epochs for fine-tuning
+  lr:                 0.0001    # fusion layers LR
+  encoder_lr:         0.000005  # smaller LR for pretrained encoders
+  weight_decay:       0.00001
+  patience:           7
+  label_smoothing:    0.1       # prevents overconfidence
+  modality_dropout:   0.10      # 10% chance to drop one modality per batch
+  finetune_encoders:  true
+  finetune_layers:    2         # unfreeze last N transformer layers
 
 paths:
   checkpoints: "checkpoints/"

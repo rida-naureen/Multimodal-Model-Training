@@ -15,8 +15,10 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
 # Map emotion string → integer class index
+# "exc" (excited) is merged into "hap" (happy) — standard 4-class IEMOCAP setup
 EMOTION_TO_IDX = {
-    "hap": 0,   # happy  (includes excited)
+    "hap": 0,   # happy
+    "exc": 0,   # excited → treated as happy
     "sad": 1,   # sad
     "ang": 2,   # angry
     "neu": 3    # neutral
