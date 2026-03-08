@@ -110,15 +110,18 @@ optimizer = torch.optim.AdamW([
     {"params": encoder_params, "lr": cfg["training"]["encoder_lr"]}
 ], weight_decay=cfg["training"]["weight_decay"])
 
-# ── OneCycleLR with warmup ─────────────────────────────────────
-EPOCHS = cfg["training"]["epochs"]
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
+# ── ReduceLROnPlateau — works correctly with early stopping ───
+# OneCycleLR assumes all N epochs will run; early stopping breaks it.
+# ReduceLROnPlateau reduces LR when val loss plateaus — compatible.
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
-    max_lr          = [cfg["training"]["lr"], cfg["training"]["encoder_lr"]],
-    steps_per_epoch = len(train_loader),
-    epochs          = EPOCHS,
-    pct_start       = 0.1    # 10% of training = warmup phase
+    mode    = "min",
+    factor  = 0.5,      # halve LR on plateau
+    patience= 3,        # wait 3 epochs before reducing
+    min_lr  = 1e-7
 )
+
+EPOCHS = cfg["training"]["epochs"]
 
 # ── Training / Validation loop ────────────────────────────────
 def run_epoch(loader, is_train):
@@ -147,7 +150,7 @@ def run_epoch(loader, is_train):
                 # Gradient clipping — prevents exploding gradients
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-                scheduler.step()
+                # NOTE: do NOT step ReduceLROnPlateau here — done per epoch below
 
             total_loss += loss.item() * labels.size(0)
             preds       = logits.argmax(dim=-1)
@@ -176,6 +179,9 @@ for epoch in range(1, EPOCHS + 1):
           f"Train  loss={train_loss:.4f}  acc={train_acc*100:.1f}%  |  "
           f"Val    loss={val_loss:.4f}  acc={val_acc*100:.1f}%  |  "
           f"lr={lr:.6f}")
+
+    # Step scheduler on val_loss each epoch (ReduceLROnPlateau)
+    scheduler.step(val_loss)
 
     log_rows.append({
         "epoch"     : epoch,

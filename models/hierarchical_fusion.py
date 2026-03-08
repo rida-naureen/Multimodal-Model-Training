@@ -134,7 +134,7 @@ class HierarchicalFusion(nn.Module):
         # ════════════════════════════════════════════════════
         # Expand speech to sequence length for attention
         speech_seq = speech.unsqueeze(1).expand(
-            -1, visual.size(1), -1)   # [B, T_v, d]
+            -1, visual.size(1), -1).contiguous()   # [B, T_v, d]
 
         # Speech enriched by Visual
         sv, w_sv = self.cma_speech_visual(

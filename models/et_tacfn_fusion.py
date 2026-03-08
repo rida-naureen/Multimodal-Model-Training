@@ -148,7 +148,8 @@ class ETTACFNFusion(nn.Module):
                         text, audio, visual,
                         text_mask, audio_mask, visual_mask,
                         self.missing_handler,
-                        dropout_prob=self.modal_dropout
+                        dropout_prob=self.modal_dropout,
+                        is_training=self.training
                     )
             # Inference: replace any None modality with learned fallback
             else:
@@ -181,10 +182,12 @@ class ETTACFNFusion(nn.Module):
             fused_hier, speech_repr, attn_weights = self.hierarchical(
                 T, A, V, text_mask, audio_mask, visual_mask)
 
-            # Also get raw pooled versions for confidence gating
-            t_pool = self._mean_pool(T, text_mask)
-            a_pool = self._mean_pool(A, audio_mask)
-            v_pool = self._mean_pool(V, visual_mask)
+            # Use the speech representation (stage-A enriched) to pool for
+            # confidence gating — richer signal than pre-fusion T/A/V.
+            # speech_repr: [B, d_model]
+            t_pool = speech_repr  # text+audio jointly enriched speech vector
+            a_pool = speech_repr  # same fused speech used for audio gate
+            v_pool = self._mean_pool(V, visual_mask)  # visual stays mean-pooled
 
         else:
             # Fallback flat fusion

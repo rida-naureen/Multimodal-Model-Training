@@ -29,13 +29,17 @@ class EmotionClassifier(nn.Module):
 
     def __init__(self, d_model=512, num_classes=4, dropout=0.1):
         super().__init__()
+        # Higher dropout (0.35) in the classifier head prevents overfitting
+        # on IEMOCAP's small dataset (~10k utterances)
+        clf_drop = max(dropout, 0.35)
         self.net = nn.Sequential(
             nn.Linear(d_model, d_model),         # 512 → 512
+            nn.LayerNorm(d_model),
             nn.GELU(),
-            nn.Dropout(dropout),
+            nn.Dropout(clf_drop),
             nn.Linear(d_model, d_model // 2),    # 512 → 256
             nn.GELU(),
-            nn.Dropout(dropout),
+            nn.Dropout(clf_drop),
             nn.Linear(d_model // 2, num_classes) # 256 → 4
         )
 

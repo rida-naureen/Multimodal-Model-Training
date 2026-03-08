@@ -102,7 +102,8 @@ class MissingModalityHandler(nn.Module):
 
 def apply_modality_dropout(text, audio, visual,
                            text_mask, audio_mask, visual_mask,
-                           handler, dropout_prob=0.10):
+                           handler, dropout_prob=0.10,
+                           is_training=True):
     """
     Training-time modality dropout.
 
@@ -115,11 +116,13 @@ def apply_modality_dropout(text, audio, visual,
         *_mask                    : padding masks
         handler                   : MissingModalityHandler instance
         dropout_prob              : probability of dropping one modality
+        is_training               : pass model.training here (do NOT rely
+                                    on handler.training — it may differ)
 
     Returns:
         Possibly modified text, audio, visual, masks
     """
-    if not handler.training or random.random() > dropout_prob:
+    if not is_training or random.random() > dropout_prob:
         return text, audio, visual, text_mask, audio_mask, visual_mask
 
     # Randomly choose which modality to drop

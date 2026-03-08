@@ -52,7 +52,7 @@ test_loader = DataLoader(
 
 # ── Load model ────────────────────────────────────────────────
 print(f"\n🤖  Loading ET-TACFN from: {CKPT_PATH}")
-checkpoint = torch.load(CKPT_PATH, map_location=DEVICE)
+checkpoint = torch.load(CKPT_PATH, map_location=DEVICE, weights_only=False)
 model      = MultimodalEmotionModel(cfg).to(DEVICE)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()

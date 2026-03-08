@@ -1,131 +1,85 @@
-# preprocessing/extract_visual.py
+# preprocessing/extract_audio.py
 # ============================================================
-#  STEP 3C — Extract VISUAL features using ResNet-50
+#  STEP 3B — Extract AUDIO features using Wav2Vec2-base
 #
-#  ⚠️  IEMOCAP has NO utterance-level video files.
-#      Video is only at DIALOG level: dialog/avi/DivX/Ses01F_impro01.avi
+#  ⚠️  IEMOCAP stores audio per-utterance as .wav files:
+#      Session1/sentences/wav/Ses01F_impro01/Ses01F_impro01_F000.wav
 #
 #  Strategy:
-#    1. Read emotion labels to get each utterance's start/end timestamp
-#    2. Open the dialog-level AVI
-#    3. Seek to the utterance's time window
-#    4. Sample 30 frames from that window
-#    5. Pass through ResNet-50 → project 2048→256
-#    6. Save as utterance-level .npy
+#    1. Walk all Session*/sentences/wav/ directories
+#    2. Load each .wav with torchaudio
+#    3. Resample to 16000 Hz (Wav2Vec2 requirement)
+#    4. Pass through Wav2Vec2-base → extract last hidden states
+#    5. Save as utterance-level .npy  shape: [T_a, 768]
 #
-#  Saves: data/processed/visual_embeddings/Ses01F_impro01_F000.npy
-#         shape: [30, 256]
+#  Saves: data/processed/audio_embeddings/Ses01F_impro01_F000.npy
+#         shape: [T_a, 768]   (T_a varies per utterance length)
 #
-#  Time: ~40–60 min for all sessions
-#  Run:  python preprocessing\extract_visual.py
+#  Time: ~30–50 min for all sessions on GPU
+#  Run:  python preprocessing\extract_audio.py
 # ============================================================
 
 import os
-import re
-import cv2
 import numpy as np
 import torch
-import torchvision.transforms as T
-from torchvision.models import resnet50, ResNet50_Weights
+import torchaudio
+from transformers import Wav2Vec2Processor, Wav2Vec2Model
 from tqdm import tqdm
 
 RAW_DIR    = "data/raw"
-OUTPUT_DIR = "data/processed/visual_embeddings"
-MAX_FRAMES = 30
+OUTPUT_DIR = "data/processed/audio_embeddings"
+TARGET_SR  = 16000   # Wav2Vec2 requires 16 kHz
 
-print("\n  Loading ResNet-50...")
-backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
-backbone = torch.nn.Sequential(*list(backbone.children())[:-1])  # remove FC
-backbone.eval()
+print("\n  Loading Wav2Vec2-base (downloads ~360MB first time)...")
+processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+wav2vec   = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
+wav2vec.eval()
 
-projector = torch.nn.Linear(2048, 256)
-projector.eval()
-
-device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-backbone  = backbone.to(device)
-projector = projector.to(device)
+device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+wav2vec = wav2vec.to(device)
 print(f"  Device: {device}")
 
-transform = T.Compose([
-    T.ToPILImage(),
-    T.Resize((224, 224)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std =[0.229, 0.224, 0.225])
-])
 
-
-def parse_timestamps(session_num):
+def load_audio(wav_path):
     """
-    Reads EmoEvaluation/*.txt to get utterance timestamps.
-    Returns dict: { "Ses01F_impro01_F000": (start_sec, end_sec), ... }
-
-    Label line format:
-      [6.2901 - 8.2357]  Ses01F_impro01_F000  hap  [2.5, 2.5, 2.5]
+    Load a .wav file and resample to TARGET_SR.
+    Returns 1-D float32 tensor at 16 kHz.
     """
-    timestamps = {}
-    emo_dir = os.path.join(RAW_DIR, f"Session{session_num}",
-                           "dialog", "EmoEvaluation")
-    if not os.path.exists(emo_dir):
-        return timestamps
-
-    for fname in os.listdir(emo_dir):
-        if not fname.endswith(".txt") or fname.startswith("._"):
-            continue
-        with open(os.path.join(emo_dir, fname),
-                  encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                # Match: [6.2901 - 8.2357]
-                m = re.match(r'\[(\d+\.\d+)\s*-\s*(\d+\.\d+)\]\s+(\S+)', line)
-                if m:
-                    start  = float(m.group(1))
-                    end    = float(m.group(2))
-                    utt_id = m.group(3).strip()
-                    timestamps[utt_id] = (start, end)
-    return timestamps
+    waveform, sr = torchaudio.load(wav_path)
+    # Convert stereo → mono
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    # Resample if needed
+    if sr != TARGET_SR:
+        waveform = torchaudio.functional.resample(waveform, sr, TARGET_SR)
+    return waveform.squeeze(0)   # [T]
 
 
-def extract_frames_from_dialog(avi_path, start_sec, end_sec):
+def embed_audio(wav_path):
     """
-    Opens dialog-level AVI, seeks to [start_sec, end_sec],
-    samples MAX_FRAMES evenly spaced frames.
-    Returns numpy array [MAX_FRAMES, 256] or None on failure.
+    wav_path → numpy array of shape [T_a, 768].
+    Returns None on error.
     """
-    cap = cv2.VideoCapture(avi_path)
-    if not cap.isOpened():
+    try:
+        waveform = load_audio(wav_path)   # [T]
+    except Exception as e:
+        print(f"\n  ⚠️  Load error {wav_path}: {e}")
         return None
 
-    fps        = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 25.0  # fallback
+    # Wav2Vec2Processor normalises the raw waveform
+    inputs = processor(
+        waveform.numpy(),
+        sampling_rate=TARGET_SR,
+        return_tensors="pt"
+    )
+    input_values = inputs.input_values.to(device)   # [1, T]
 
-    start_frame = int(start_sec * fps)
-    end_frame   = int(end_sec   * fps)
-    n_frames    = max(end_frame - start_frame, 1)
-
-    indices = np.linspace(start_frame, end_frame - 1, MAX_FRAMES, dtype=int)
-    frames  = []
-
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if ret and frame is not None:
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        else:
-            # If seek fails, use a blank frame
-            frames.append(np.zeros((224, 224, 3), dtype=np.uint8))
-
-    cap.release()
-
-    feats = []
     with torch.no_grad():
-        for frame in frames:
-            t    = transform(frame).unsqueeze(0).to(device)
-            feat = backbone(t).squeeze()          # [2048]
-            feat = projector(feat)                # [256]
-            feats.append(feat.cpu().numpy())
+        outputs = wav2vec(input_values)
+        # last_hidden_state: [1, T_a, 768]
+        hidden = outputs.last_hidden_state.squeeze(0)   # [T_a, 768]
 
-    return np.stack(feats)  # [30, 256]
+    return hidden.cpu().numpy()
 
 
 def extract_all():
@@ -133,61 +87,42 @@ def extract_all():
     saved = skipped = failed = 0
 
     for session_num in range(1, 6):
-        avi_dir = os.path.join(RAW_DIR, f"Session{session_num}",
-                               "dialog", "avi", "DivX")
-        if not os.path.exists(avi_dir):
-            print(f"  ⚠️  Session{session_num}: dialog/avi/DivX/ not found")
+        wav_root = os.path.join(RAW_DIR, f"Session{session_num}",
+                                "sentences", "wav")
+        if not os.path.exists(wav_root):
+            print(f"  ⚠️  Session{session_num}: sentences/wav/ not found — skipping")
             continue
 
-        # Get all utterance timestamps
-        timestamps = parse_timestamps(session_num)
-        if not timestamps:
-            print(f"  ⚠️  Session{session_num}: no timestamps found")
-            continue
+        # Collect all .wav paths
+        wav_paths = []
+        for dialog_dir in os.listdir(wav_root):
+            dialog_path = os.path.join(wav_root, dialog_dir)
+            if not os.path.isdir(dialog_path):
+                continue
+            for fname in os.listdir(dialog_path):
+                if fname.endswith(".wav") and not fname.startswith("._"):
+                    utt_id = os.path.splitext(fname)[0]   # e.g. Ses01F_impro01_F000
+                    wav_paths.append((utt_id, os.path.join(dialog_path, fname)))
 
-        # Group utterances by their dialog (e.g. Ses01F_impro01)
-        dialog_utts = {}
-        for utt_id, ts in timestamps.items():
-            # Extract dialog name: Ses01F_impro01 from Ses01F_impro01_F000
-            parts  = utt_id.rsplit("_", 1)
-            dialog = parts[0]  # e.g. Ses01F_impro01
-            dialog_utts.setdefault(dialog, []).append((utt_id, ts))
+        print(f"\n  Session{session_num} — {len(wav_paths)} utterances")
 
-        # Get available AVI files
-        avis = {os.path.splitext(f)[0]: os.path.join(avi_dir, f)
-                for f in os.listdir(avi_dir)
-                if f.endswith(".avi") and not f.startswith("._")}
-
-        print(f"\n  Session{session_num} — {len(timestamps)} utterances "
-              f"across {len(avis)} dialog AVIs")
-
-        for dialog, utts in tqdm(dialog_utts.items(), desc=f"  Ses0{session_num}"):
-            avi_path = avis.get(dialog)
-            if not avi_path:
-                failed += len(utts)
+        for utt_id, wav_path in tqdm(wav_paths, desc=f"  Ses0{session_num}"):
+            save_path = os.path.join(OUTPUT_DIR, f"{utt_id}.npy")
+            if os.path.exists(save_path):
+                skipped += 1
                 continue
 
-            for utt_id, (start, end) in utts:
-                save_path = os.path.join(OUTPUT_DIR, f"{utt_id}.npy")
-                if os.path.exists(save_path):
-                    skipped += 1
-                    continue
+            emb = embed_audio(wav_path)
+            if emb is not None:
+                np.save(save_path, emb)
+                saved += 1
+            else:
+                failed += 1
 
-                try:
-                    feats = extract_frames_from_dialog(avi_path, start, end)
-                    if feats is not None:
-                        np.save(save_path, feats)
-                        saved += 1
-                    else:
-                        failed += 1
-                except Exception as e:
-                    print(f"\n  ⚠️  {utt_id}: {e}")
-                    failed += 1
-
-    print(f"\n  ✅  Visual done: {saved} saved, {skipped} existed, {failed} failed")
+    print(f"\n  ✅  Audio done: {saved} saved, {skipped} existed, {failed} failed")
     print(f"      → {OUTPUT_DIR}")
-    print("\n  Preprocessing complete! Run next:")
-    print("      python train.py\n")
+    print("\n  Run next:")
+    print("      python preprocessing\\extract_visual.py\n")
 
 
 if __name__ == "__main__":
