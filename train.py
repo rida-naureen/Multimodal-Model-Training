@@ -58,6 +58,12 @@ val_loader = DataLoader(
     val_set, batch_size=cfg["training"]["batch_size"],
     shuffle=False, collate_fn=collate_fn, num_workers=0)
 
+if len(train_set) == 0:
+    raise RuntimeError("❌  Training set is empty — check that text and audio "
+                       ".npy files exist in the processed directories.")
+if len(val_set) == 0:
+    print("⚠️   Validation set is empty — val loss/acc will read 0.0 each epoch.")
+
 # ── Weighted Loss (handles class imbalance) ───────────────────
 # Rare emotions (Happy, Angry) get higher penalty when wrong
 print("\n⚖️   Computing class weights for imbalanced classes...")
@@ -157,6 +163,8 @@ def run_epoch(loader, is_train):
             correct    += (preds == labels).sum().item()
             total      += labels.size(0)
 
+    if total == 0:
+        return 0.0, 0.0   # empty loader — avoid ZeroDivisionError
     return total_loss / total, correct / total
 
 

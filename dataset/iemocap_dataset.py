@@ -66,21 +66,28 @@ class IEMOCAPDataset(Dataset):
         self.audio_dir  = audio_dir
         self.visual_dir = visual_dir
 
-        # ── Keep only utterances where all 3 .npy files exist ─
+        # ── Keep only utterances where text + audio .npy files exist ─
+        # Visual embeddings are optional: if missing, a zero tensor is used.
         valid, skipped = [], 0
+        missing_visual = 0
         for uid in all_ids:
             has_text   = os.path.exists(os.path.join(text_dir,   f"{uid}.npy"))
             has_audio  = os.path.exists(os.path.join(audio_dir,  f"{uid}.npy"))
             has_visual = os.path.exists(os.path.join(visual_dir, f"{uid}.npy"))
             has_label  = uid in self.label_map
-            if has_text and has_audio and has_visual and has_label:
+            if has_text and has_audio and has_label:
                 valid.append(uid)
+                if not has_visual:
+                    missing_visual += 1
             else:
                 skipped += 1
 
         if skipped > 0:
             print(f"  [{split}] ⚠️  Skipped {skipped} utterances "
-                  f"(missing .npy files or label)")
+                  f"(missing text/audio .npy or label)")
+        if missing_visual > 0:
+            print(f"  [{split}] ℹ️  {missing_visual} utterances missing visual .npy "
+                  f"→ zero tensors will be used")
         print(f"  [{split}] ✅  {len(valid)} utterances ready")
         self.utt_ids = valid
 
@@ -93,7 +100,11 @@ class IEMOCAPDataset(Dataset):
         # Load pre-extracted features
         text   = np.load(os.path.join(self.text_dir,   f"{uid}.npy"))  # [T_t, 768]
         audio  = np.load(os.path.join(self.audio_dir,  f"{uid}.npy"))  # [T_a, 768]
-        visual = np.load(os.path.join(self.visual_dir, f"{uid}.npy"))  # [30,  256]
+        visual_path = os.path.join(self.visual_dir, f"{uid}.npy")
+        if os.path.exists(visual_path):
+            visual = np.load(visual_path)                               # [30, 256]
+        else:
+            visual = np.zeros((30, 256), dtype=np.float32)             # zero fallback
 
         emotion = self.label_map[uid]
         label   = EMOTION_TO_IDX[emotion]
