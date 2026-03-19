@@ -74,7 +74,12 @@ class ETTACFNFusion(nn.Module):
 
         # ── Contribution 4: Missing Modality Handler ──────────
         if self.use_missing:
-            self.missing_handler = MissingModalityHandler(d_model=d_model)
+            self.missing_handler = MissingModalityHandler(
+                d_model    = d_model,
+                text_dim   = text_dim,
+                audio_dim  = audio_dim,
+                visual_dim = visual_dim
+            )
 
         # ── Contribution 1: Trimodal Intra-Modal Self-Attention
         if self.use_intra:
@@ -179,14 +184,9 @@ class ETTACFNFusion(nn.Module):
         # ════════════════════════════════════════════════════════
         attn_weights = {}
         if self.use_hierarchical:
-            fused_hier, speech_repr, attn_weights = self.hierarchical(
+            fused_hier, speech_repr, t_pool, a_pool, attn_weights = self.hierarchical(
                 T, A, V, text_mask, audio_mask, visual_mask)
 
-            # Use the speech representation (stage-A enriched) to pool for
-            # confidence gating — richer signal than pre-fusion T/A/V.
-            # speech_repr: [B, d_model]
-            t_pool = speech_repr  # text+audio jointly enriched speech vector
-            a_pool = speech_repr  # same fused speech used for audio gate
             v_pool = self._mean_pool(V, visual_mask)  # visual stays mean-pooled
 
         else:

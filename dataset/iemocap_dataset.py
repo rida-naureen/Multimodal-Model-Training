@@ -23,7 +23,7 @@ EMOTION_TO_IDX = {
     "ang": 2,   # angry
     "neu": 3    # neutral
 }
-IDX_TO_EMOTION = {v: k for k, v in EMOTION_TO_IDX.items()}
+IDX_TO_EMOTION = {0: "hap", 1: "sad", 2: "ang", 3: "neu"}  # 0=hap (exc merged into hap)
 
 
 def load_label_map(splits_dir):

@@ -48,17 +48,20 @@ class MissingModalityHandler(nn.Module):
         # text is now replaced with learned "missing text" embedding
     """
 
-    def __init__(self, d_model=512, max_text=128, max_audio=300, max_visual=30):
+    def __init__(self, d_model=512,
+                 text_dim=768, audio_dim=768, visual_dim=256,
+                 max_text=128, max_audio=300, max_visual=30):
         super().__init__()
         self.max_text   = max_text
         self.max_audio  = max_audio
         self.max_visual = max_visual
 
-        # Learnable missing tokens — one sequence per modality
-        # Shape [1, max_len, d_model] — will be expanded to batch size
-        self.missing_text   = nn.Parameter(torch.randn(1, max_text,   d_model) * 0.02)
-        self.missing_audio  = nn.Parameter(torch.randn(1, max_audio,  d_model) * 0.02)
-        self.missing_visual = nn.Parameter(torch.randn(1, max_visual, d_model) * 0.02)
+        # Learnable missing tokens — stored in RAW input dims (before projection)
+        # so they pass correctly through ModalityProjector just like real features.
+        # Shape [1, max_len, raw_dim] — expanded to batch size at runtime
+        self.missing_text   = nn.Parameter(torch.randn(1, max_text,   text_dim)   * 0.02)
+        self.missing_audio  = nn.Parameter(torch.randn(1, max_audio,  audio_dim)  * 0.02)
+        self.missing_visual = nn.Parameter(torch.randn(1, max_visual, visual_dim) * 0.02)
 
     def forward(self, text=None, audio=None, visual=None,
                 text_mask=None, audio_mask=None, visual_mask=None,

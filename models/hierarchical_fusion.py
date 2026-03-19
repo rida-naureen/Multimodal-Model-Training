@@ -100,6 +100,9 @@ class HierarchicalFusion(nn.Module):
 
         Returns:
             fused       : [B, d_model]  final emotion representation
+            speech      : [B, d_model]  intermediate speech representation (Stage A output)
+            t_pool      : [B, d_model]  mean-pooled text-enriched features (for confidence gating)
+            a_pool      : [B, d_model]  mean-pooled audio-enriched features (for confidence gating)
             attn_weights: dict          attention weights for analysis
         """
 
@@ -170,4 +173,4 @@ class HierarchicalFusion(nn.Module):
             "visual_audio":  w_va,
         }
 
-        return fused, speech, attn_weights
+        return fused, speech, t_pool, a_pool, attn_weights

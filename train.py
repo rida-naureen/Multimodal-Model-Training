@@ -219,10 +219,13 @@ for epoch in range(1, EPOCHS + 1):
 
 # ── Save log ──────────────────────────────────────────────────
 log_path = os.path.join(LOG_DIR, "training_log.csv")
-with open(log_path, "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
-    writer.writeheader()
-    writer.writerows(log_rows)
+if log_rows:
+    with open(log_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(log_rows)
+else:
+    print("⚠️   No epochs completed — training log not saved.")
 
 print(f"\n{'='*55}")
 print(f"  ✅  Training complete!")
