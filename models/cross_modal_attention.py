@@ -57,12 +57,13 @@ class CrossModalAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, query_mod, kv_mod, key_mask=None):
+    def forward(self, query_mod, kv_mod, key_mask=None, need_weights=True):
         attended, attn_weights = self.attn(
             query            = query_mod,
             key              = kv_mod,
             value            = kv_mod,
             key_padding_mask = key_mask,
+            need_weights     = need_weights,        # False during training → ~40% less attn memory
             average_attn_weights = False
         )
         x = self.norm1(query_mod + self.dropout(attended))

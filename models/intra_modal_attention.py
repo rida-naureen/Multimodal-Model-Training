@@ -64,11 +64,14 @@ class IntraModalSelfAttention(nn.Module):
 
     def forward(self, x, mask=None):
         # Self-attention: Q=K=V=x
+        # need_weights=False during training: skip materialising the full
+        # [B, heads, T, T] attn matrix — significant memory saving for long sequences.
         attn_out, _ = self.self_attn(
             query            = x,
             key              = x,
             value            = x,
-            key_padding_mask = mask   # ignore padded positions
+            key_padding_mask = mask,
+            need_weights     = not self.training
         )
 
         # Residual + LayerNorm (TACFN design)

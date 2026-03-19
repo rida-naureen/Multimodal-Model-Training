@@ -38,6 +38,7 @@ training:
   patience:           7
   label_smoothing:    0.1       # prevents overconfidence
   modality_dropout:   0.10      # 10% chance to drop one modality per batch
+  grad_accum_steps:   4         # accumulate 4 micro-batches → effective batch 64
   finetune_encoders:  true
   finetune_layers:    2         # unfreeze last N transformer layers
 

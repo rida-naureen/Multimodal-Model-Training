@@ -6,10 +6,16 @@
 #    • Weighted cross-entropy loss  (handles class imbalance)
 #    • Label smoothing 0.1          (prevents overconfidence)
 #    • Separate LRs: encoders get smaller LR than fusion layers
-#    • OneCycleLR scheduler with warmup
+#    • ReduceLROnPlateau scheduler
 #    • Gradient clipping
 #    • Early stopping (patience=7)
 #    • Saves best model + training log
+#
+#  Memory optimisations (CUDA OOM fixes):
+#    • Mixed precision (torch.cuda.amp)  → ~50% less VRAM
+#    • Gradient accumulation             → large effective batch without OOM
+#    • set_to_none=True zero_grad        → frees gradient buffers immediately
+#    • Attention weights NOT stored in backward graph during training
 #
 #  Run:  python train.py
 # ============================================================
@@ -21,6 +27,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
 
@@ -32,9 +39,15 @@ with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"\n🖥️   Device : {DEVICE}")
+USE_AMP = DEVICE.type == "cuda"   # AMP only meaningful on CUDA
+print(f"\n🖥️   Device   : {DEVICE}")
 if DEVICE.type == "cuda":
-    print(f"     GPU    : {torch.cuda.get_device_name(0)}")
+    print(f"     GPU      : {torch.cuda.get_device_name(0)}")
+    total_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"     VRAM     : {total_mem:.1f} GB")
+    print(f"     AMP      : enabled (fp16 forward + fp32 gradients)")
+else:
+    print(f"     AMP      : disabled (CPU mode)")
 
 # ── Paths ─────────────────────────────────────────────────────
 SPLITS_DIR = cfg["data"]["splits_dir"]
@@ -51,12 +64,22 @@ print("\n📂  Loading datasets...")
 train_set = IEMOCAPDataset("train", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
 val_set   = IEMOCAPDataset("val",   SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
 
+# ── Gradient accumulation ─────────────────────────────────────
+# Accumulate N micro-batches before optimizer.step().
+# Effective batch = batch_size * ACCUM_STEPS.
+# Reduces peak VRAM by 1/ACCUM_STEPS while keeping the same LR dynamics.
+ACCUM_STEPS = cfg["training"].get("grad_accum_steps", 4)
+print(f"\n🔄  Gradient accumulation : {ACCUM_STEPS} steps "
+      f"(effective batch = {cfg['training']['batch_size'] * ACCUM_STEPS})")
+
 train_loader = DataLoader(
     train_set, batch_size=cfg["training"]["batch_size"],
-    shuffle=True, collate_fn=collate_fn, num_workers=0)
+    shuffle=True,  collate_fn=collate_fn, num_workers=0,
+    pin_memory=(DEVICE.type == "cuda"))   # faster CPU→GPU transfer
 val_loader = DataLoader(
-    val_set, batch_size=cfg["training"]["batch_size"],
-    shuffle=False, collate_fn=collate_fn, num_workers=0)
+    val_set,   batch_size=cfg["training"]["batch_size"],
+    shuffle=False, collate_fn=collate_fn, num_workers=0,
+    pin_memory=(DEVICE.type == "cuda"))
 
 if len(train_set) == 0:
     raise RuntimeError("❌  Training set is empty — check that text and audio "
@@ -129,43 +152,75 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 
 EPOCHS = cfg["training"]["epochs"]
 
+# ── AMP GradScaler ────────────────────────────────────────────
+# Scales the loss to avoid fp16 underflow, then unscales before
+# clipping and the optimizer step. No-ops transparently on CPU.
+scaler = GradScaler(enabled=USE_AMP)
+
 # ── Training / Validation loop ────────────────────────────────
 def run_epoch(loader, is_train):
     model.train() if is_train else model.eval()
     total_loss, correct, total = 0.0, 0, 0
 
-    with torch.set_grad_enabled(is_train):
-        for batch in tqdm(loader,
-                          desc="  Train" if is_train else "  Val  ",
-                          leave=False):
+    optimizer.zero_grad(set_to_none=True)   # start each epoch clean
 
-            text   = batch["text"].to(DEVICE)
-            audio  = batch["audio"].to(DEVICE)
-            visual = batch["visual"].to(DEVICE)
-            labels = batch["label"].to(DEVICE)
-            t_mask = batch["text_mask"].to(DEVICE)
-            a_mask = batch["audio_mask"].to(DEVICE)
-            v_mask = batch["visual_mask"].to(DEVICE)
+    for step, batch in enumerate(tqdm(
+            loader, desc="  Train" if is_train else "  Val  ", leave=False)):
 
-            logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask)
-            loss      = criterion(logits, labels)
+        text   = batch["text"].to(DEVICE,   non_blocking=True)
+        audio  = batch["audio"].to(DEVICE,  non_blocking=True)
+        visual = batch["visual"].to(DEVICE, non_blocking=True)
+        labels = batch["label"].to(DEVICE,  non_blocking=True)
+        t_mask = batch["text_mask"].to(DEVICE,   non_blocking=True)
+        a_mask = batch["audio_mask"].to(DEVICE,  non_blocking=True)
+        v_mask = batch["visual_mask"].to(DEVICE, non_blocking=True)
 
-            if is_train:
-                optimizer.zero_grad()
-                loss.backward()
-                # Gradient clipping — prevents exploding gradients
+        # ── Forward pass under AMP context ────────────────────
+        # autocast casts eligible ops to fp16 automatically.
+        # On CPU it is a no-op (USE_AMP=False).
+        with autocast(enabled=USE_AMP):
+            with torch.set_grad_enabled(is_train):
+                logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask)
+                loss      = criterion(logits, labels)
+                if is_train:
+                    # Scale loss for accumulation: each micro-step contributes
+                    # 1/ACCUM_STEPS of a full gradient step.
+                    loss = loss / ACCUM_STEPS
+
+        if is_train:
+            # ── Backward under AMP scaler ──────────────────────
+            # scaler.scale() multiplies loss by current scale factor
+            # so fp16 gradients don't underflow to zero.
+            scaler.scale(loss).backward()
+
+            # Only step optimizer every ACCUM_STEPS micro-batches
+            is_update_step = (step + 1) % ACCUM_STEPS == 0 or \
+                             (step + 1) == len(loader)
+            if is_update_step:
+                # Unscale before clipping so clip threshold is in true units
+                scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                # NOTE: do NOT step ReduceLROnPlateau here — done per epoch below
 
-            total_loss += loss.item() * labels.size(0)
-            preds       = logits.argmax(dim=-1)
-            correct    += (preds == labels).sum().item()
-            total      += labels.size(0)
+                scaler.step(optimizer)   # skips step if grads have inf/nan
+                scaler.update()          # adjusts scale factor for next iter
+
+                # set_to_none is faster than zero_grad() — actually deallocates
+                optimizer.zero_grad(set_to_none=True)
+
+        # Track metrics with UN-scaled loss value
+        raw_loss = loss.item() * (ACCUM_STEPS if is_train else 1)
+        total_loss += raw_loss * labels.size(0)
+        preds       = logits.detach().argmax(dim=-1)
+        correct    += (preds == labels).sum().item()
+        total      += labels.size(0)
+
+        # Explicitly release GPU tensors — helps with tight VRAM
+        del text, audio, visual, labels, t_mask, a_mask, v_mask, logits
 
     if total == 0:
         return 0.0, 0.0   # empty loader — avoid ZeroDivisionError
     return total_loss / total, correct / total
+
 
 
 # ── Main loop ─────────────────────────────────────────────────
