@@ -33,7 +33,7 @@ def load_label_map(splits_dir):
     """
     label_map = {}
     path = os.path.join(splits_dir, "labels.txt")
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="latin-1") as f:  # latin-1 decodes any byte → no UnicodeDecodeError
         for line in f:
             line = line.strip()
             if line:
@@ -58,7 +58,7 @@ class IEMOCAPDataset(Dataset):
     def __init__(self, split, splits_dir, text_dir, audio_dir, visual_dir):
         # ── Load utterance IDs for this split ─────────────────
         split_file = os.path.join(splits_dir, f"{split}_ids.txt")
-        with open(split_file, encoding="utf-8") as f:
+        with open(split_file, encoding="latin-1") as f:  # latin-1 safe for IEMOCAP splits
             all_ids = [l.strip() for l in f if l.strip()]
 
         self.label_map  = load_label_map(splits_dir)

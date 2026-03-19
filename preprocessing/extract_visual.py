@@ -62,7 +62,7 @@ def parse_emo_evaluation(emo_file):
     Returns dict: {utt_id: (start_sec, end_sec)}
     """
     timestamps = {}
-    with open(emo_file, "r") as f:
+    with open(emo_file, "r", encoding="latin-1") as f:  # latin-1 safe for IEMOCAP annotation files
         for line in f:
             # Format: [start_time - end_time]	Ses01F_impro01_F001	ang	...
             m = re.match(r"\[(\d+\.\d+)\s*-\s*(\d+\.\d+)\]\s+(\S+)\s+\w+", line)
