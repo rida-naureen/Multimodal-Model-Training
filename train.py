@@ -25,11 +25,36 @@ import csv
 import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from sklearn.utils.class_weight import compute_class_weight
 from tqdm import tqdm
+
+# ── Tier 1: Focal Loss ────────────────────────────────────────
+class FocalLoss(nn.Module):
+    """
+    Focal Loss — addresses Sad recall=48.6% by down-weighting easy examples
+    (clear Happy / Angry) and focusing gradient on hard Sad↔Neutral boundary.
+    gamma=2 is the standard value. Class weight + label_smoothing are preserved.
+    """
+    def __init__(self, gamma: float = 2.0, weight=None, label_smoothing: float = 0.1):
+        super().__init__()
+        self.gamma           = gamma
+        self.weight          = weight
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(
+            logits, targets,
+            weight          = self.weight,
+            label_smoothing = self.label_smoothing,
+            reduction       = 'none'
+        )
+        pt    = torch.exp(-ce)                       # p(correct class)
+        focal = (1.0 - pt) ** self.gamma * ce        # high loss for low-confidence samples
+        return focal.mean()
 
 from dataset.iemocap_dataset import IEMOCAPDataset, collate_fn
 from models.classifier import MultimodalEmotionModel
@@ -61,8 +86,8 @@ os.makedirs(LOG_DIR,  exist_ok=True)
 
 # ── Datasets ──────────────────────────────────────────────────
 print("\n📂  Loading datasets...")
-train_set = IEMOCAPDataset("train", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
-val_set   = IEMOCAPDataset("val",   SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
+train_set = IEMOCAPDataset("train", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR, cfg=cfg)
+val_set   = IEMOCAPDataset("val",   SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR, cfg=cfg)
 
 # ── Gradient accumulation ─────────────────────────────────────
 # Accumulate N micro-batches before optimizer.step().
@@ -103,13 +128,23 @@ class_weights = compute_class_weight(
     classes      = np.array([0, 1, 2, 3]),
     y            = np.array(label_ints)
 )
-weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-print(f"     Class weights: { {['hap','sad','ang','neu'][i]: round(w,3) for i,w in enumerate(class_weights)} }")
 
-# Label smoothing (0.1) + class weights combined
-criterion = nn.CrossEntropyLoss(
-    weight         = weights_tensor,
-    label_smoothing= cfg["training"]["label_smoothing"]
+# ── Tier 1: Boost Sad (index 1) weight ───────────────────────
+# Sad recall was 48.6% — model confused Sad with Neutral (shared low arousal).
+# Multiply balanced weight by sad_weight_mult, then re-normalise so total scale
+# is unchanged (avoids inflating the loss magnitude).
+sad_mult = cfg["training"].get("sad_weight_mult", 1.5)
+class_weights[1] *= sad_mult
+class_weights     = class_weights / class_weights.sum() * len(class_weights)  # re-normalise
+weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+print(f"     Class weights (after Sad ×{sad_mult}): "
+      f"{ {['hap','sad','ang','neu'][i]: round(w,3) for i,w in enumerate(class_weights)} }")
+
+# ── Tier 1: Focal Loss replaces CrossEntropyLoss ─────────────
+criterion = FocalLoss(
+    gamma           = cfg["training"].get("focal_gamma", 2.0),
+    weight          = weights_tensor,
+    label_smoothing = cfg["training"]["label_smoothing"]
 )
 
 # ── Model ─────────────────────────────────────────────────────
@@ -175,12 +210,16 @@ def run_epoch(loader, is_train):
         a_mask = batch["audio_mask"].to(DEVICE,  non_blocking=True)
         v_mask = batch["visual_mask"].to(DEVICE, non_blocking=True)
 
+        # ── Tier 3: conversation context window (optional) ────
+        ctx_window = batch.get("context_window", None)
+        if ctx_window is not None:
+            ctx_window = ctx_window.to(DEVICE, non_blocking=True)
+
         # ── Forward pass under AMP context ────────────────────
-        # autocast casts eligible ops to fp16 automatically.
-        # On CPU it is a no-op (USE_AMP=False).
         with autocast(enabled=USE_AMP):
             with torch.set_grad_enabled(is_train):
-                logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask)
+                logits, _ = model(text, audio, visual, t_mask, a_mask, v_mask,
+                                  context_window=ctx_window)
                 loss      = criterion(logits, labels)
                 if is_train:
                     # Scale loss for accumulation: each micro-step contributes
@@ -216,6 +255,8 @@ def run_epoch(loader, is_train):
 
         # Explicitly release GPU tensors — helps with tight VRAM
         del text, audio, visual, labels, t_mask, a_mask, v_mask, logits
+        if ctx_window is not None:
+            del ctx_window
 
     if total == 0:
         return 0.0, 0.0   # empty loader — avoid ZeroDivisionError

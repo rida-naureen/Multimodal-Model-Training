@@ -53,20 +53,22 @@ class IEMOCAPDataset(Dataset):
         text_dir   : "data/processed/text_embeddings"
         audio_dir  : "data/processed/audio_embeddings"
         visual_dir : "data/processed/visual_embeddings"
+        cfg        : full config dict (used for Tier 3 context window)
     """
 
-    def __init__(self, split, splits_dir, text_dir, audio_dir, visual_dir):
-        # ── Load utterance IDs for this split ─────────────────
+    def __init__(self, split, splits_dir, text_dir, audio_dir, visual_dir, cfg=None):
+        # ── Load utterance IDs for this split ───────────────────
         split_file = os.path.join(splits_dir, f"{split}_ids.txt")
-        with open(split_file, encoding="latin-1") as f:  # latin-1 safe for IEMOCAP splits
+        with open(split_file, encoding="latin-1") as f:
             all_ids = [l.strip() for l in f if l.strip()]
 
         self.label_map  = load_label_map(splits_dir)
         self.text_dir   = text_dir
         self.audio_dir  = audio_dir
         self.visual_dir = visual_dir
+        self.cfg        = cfg or {}
 
-        # ── Keep only utterances where text + audio .npy files exist ─
+        # ── Keep only utterances where text + audio .npy files exist ────
         # Visual embeddings are optional: if missing, a zero tensor is used.
         valid, skipped = [], 0
         missing_visual = 0
@@ -89,33 +91,95 @@ class IEMOCAPDataset(Dataset):
             print(f"  [{split}] ℹ️  {missing_visual} utterances missing visual .npy "
                   f"→ zero tensors will be used")
         print(f"  [{split}] ✅  {len(valid)} utterances ready")
-        self.utt_ids = valid
+
+        # ── Sort by dialogue + utterance order for context window ─────
+        # IEMOCAP IDs: Ses01F_impro01_F000 — sort lexicographically keeps
+        # dialogue session and utterance order intact.
+        self.utt_ids = sorted(valid)
 
     def __len__(self):
         return len(self.utt_ids)
+
+    # ── Helper: load individual modality features ────────────────
+    def _load_text(self, uid):
+        return torch.tensor(
+            np.load(os.path.join(self.text_dir, f"{uid}.npy")),
+            dtype=torch.float32)
+
+    def _load_audio(self, uid):
+        return torch.tensor(
+            np.load(os.path.join(self.audio_dir, f"{uid}.npy")),
+            dtype=torch.float32)
+
+    def _load_visual(self, uid):
+        path = os.path.join(self.visual_dir, f"{uid}.npy")
+        if os.path.exists(path):
+            return torch.tensor(np.load(path), dtype=torch.float32)
+        return torch.zeros(30, 256, dtype=torch.float32)   # fallback
+
+    # ── Helper: dialogue boundary check for context window ───
+    @staticmethod
+    def _same_dialogue(uid_a: str, uid_b: str) -> bool:
+        """True when both utterances belong to the same IEMOCAP dialogue.
+        IEMOCAP ID format: Ses01F_impro01_F000
+        Dialogue = 'Ses01F_impro01' (everything before the last _SPEAKER+number)
+        """
+        def _dialogue_id(uid):
+            # Split on '_' and drop the LAST part (speaker+index, e.g. F000)
+            parts = uid.split('_')
+            return '_'.join(parts[:-1])
+        return _dialogue_id(uid_a) == _dialogue_id(uid_b)
 
     def __getitem__(self, idx):
         uid = self.utt_ids[idx]
 
         # Load pre-extracted features
-        text   = np.load(os.path.join(self.text_dir,   f"{uid}.npy"))  # [T_t, 768]
-        audio  = np.load(os.path.join(self.audio_dir,  f"{uid}.npy"))  # [T_a, 768]
-        visual_path = os.path.join(self.visual_dir, f"{uid}.npy")
-        if os.path.exists(visual_path):
-            visual = np.load(visual_path)                               # [30, 256]
-        else:
-            visual = np.zeros((30, 256), dtype=np.float32)             # zero fallback
+        text   = self._load_text(uid)    # [T_t, text_dim]
+        audio  = self._load_audio(uid)   # [T_a, audio_dim]
+        visual = self._load_visual(uid)  # [30,  visual_dim]
 
         emotion = self.label_map[uid]
         label   = EMOTION_TO_IDX[emotion]
 
-        return {
+        sample = {
             "utt_id": uid,
-            "text":   torch.tensor(text,   dtype=torch.float32),
-            "audio":  torch.tensor(audio,  dtype=torch.float32),
-            "visual": torch.tensor(visual, dtype=torch.float32),
-            "label":  torch.tensor(label,  dtype=torch.long)
+            "text":   text,
+            "audio":  audio,
+            "visual": visual,
+            "label":  torch.tensor(label, dtype=torch.long)
         }
+
+        # ── Tier 3: Build 5-utterance context window ────────────
+        # Only when use_conversation_context is enabled in config.
+        use_ctx = (self.cfg.get("model", {})
+                       .get("use_conversation_context", False))
+        if use_ctx:
+            d_model = self.cfg["model"]["d_model"]
+            window_feats = []
+            for offset in range(-2, 3):            # offsets: -2, -1, 0, +1, +2
+                nb_idx = idx + offset
+                # Use zero vector if outside this dialogue or out of bounds
+                if (0 <= nb_idx < len(self.utt_ids) and
+                        self._same_dialogue(self.utt_ids[nb_idx], uid)):
+                    nb_uid  = self.utt_ids[nb_idx]
+                    nb_t    = self._load_text(nb_uid).mean(0)    # [text_dim]
+                    nb_a    = self._load_audio(nb_uid).mean(0)   # [audio_dim]
+                    nb_v    = self._load_visual(nb_uid).mean(0)  # [visual_dim]
+                    # Concatenate along feature axis and project to d_model via mean
+                    # (simple proxy; the context module learns the actual mixing)
+                    # Pad/truncate to d_model
+                    raw = torch.cat([nb_t, nb_a, nb_v], dim=0)  # [text+audio+visual]
+                    if raw.shape[0] >= d_model:
+                        window_feats.append(raw[:d_model])
+                    else:
+                        pad = torch.zeros(d_model - raw.shape[0])
+                        window_feats.append(torch.cat([raw, pad]))
+                else:
+                    window_feats.append(torch.zeros(d_model))
+
+            sample["context_window"] = torch.stack(window_feats)  # [5, d_model]
+
+        return sample
 
 
 def collate_fn(batch):
@@ -127,10 +191,11 @@ def collate_fn(batch):
     we pad them to the longest in the batch.
 
     Returns tensors of shape:
-      text:   [B, T_t_max, 768]
-      audio:  [B, T_a_max, 768]
-      visual: [B, 30, 256]       (already fixed length)
+      text:   [B, T_t_max, text_dim]   (1024 for RoBERTa-large)
+      audio:  [B, T_a_max, audio_dim]  (1024 for WavLM-Base+)
+      visual: [B, 30, 256]             (already fixed length)
       label:  [B]
+      context_window: [B, 5, d_model]  (Tier 3, if present)
     """
     texts   = [item["text"]   for item in batch]
     audios  = [item["audio"]  for item in batch]
@@ -139,8 +204,8 @@ def collate_fn(batch):
     utt_ids = [item["utt_id"] for item in batch]
 
     # Pad variable-length sequences
-    texts_padded   = pad_sequence(texts,   batch_first=True)   # [B, T_t, 768]
-    audios_padded  = pad_sequence(audios,  batch_first=True)   # [B, T_a, 768]
+    texts_padded   = pad_sequence(texts,   batch_first=True)   # [B, T_t, text_dim]
+    audios_padded  = pad_sequence(audios,  batch_first=True)   # [B, T_a, audio_dim]
     visuals_padded = torch.stack(visuals)                      # [B, 30,  256]
 
     # Padding masks: True = this position is padding (ignore in attention)
@@ -156,7 +221,7 @@ def collate_fn(batch):
     # visual is fixed length (30 frames) → no padding needed
     visual_mask = torch.zeros(len(batch), visuals_padded.shape[1], dtype=torch.bool)
 
-    return {
+    result = {
         "utt_ids":     utt_ids,
         "text":        texts_padded,
         "audio":       audios_padded,
@@ -166,3 +231,10 @@ def collate_fn(batch):
         "visual_mask": visual_mask,
         "label":       labels
     }
+
+    # Tier 3: stack context windows if present in the batch
+    if "context_window" in batch[0]:
+        result["context_window"] = torch.stack(
+            [item["context_window"] for item in batch])  # [B, 5, d_model]
+
+    return result

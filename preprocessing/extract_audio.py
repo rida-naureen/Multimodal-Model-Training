@@ -1,21 +1,30 @@
 # preprocessing/extract_audio.py
 # ============================================================
-#  STEP 3B — Extract AUDIO features using Wav2Vec2-base
+#  STEP 3B — Extract AUDIO features using WavLM-Base+ (Tier 2 upgrade)
 #
-#  ⚠️  IEMOCAP stores audio per-utterance as .wav files:
+#  Tier 2 change: facebook/wav2vec2-base-960h (768-d)
+#              →  microsoft/wavlm-base-plus   (1024-d)
+#  WavLM adds masked speech + denoising pretraining for richer prosody.
+#  Expected gain: +3–5 pp UA on IEMOCAP 4-class.
+#
+#  ⚠️  IMPORTANT: Delete old 768-d .npy files first!
+#      Remove-Item -Recurse -Force data\processed\audio_embeddings\*
+#
+#  IEMOCAP stores audio per-utterance as .wav files:
 #      Session1/sentences/wav/Ses01F_impro01/Ses01F_impro01_F000.wav
 #
 #  Strategy:
 #    1. Walk all Session*/sentences/wav/ directories
 #    2. Load each .wav with torchaudio
-#    3. Resample to 16000 Hz (Wav2Vec2 requirement)
-#    4. Pass through Wav2Vec2-base → extract last hidden states
-#    5. Save as utterance-level .npy  shape: [T_a, 768]
+#    3. Resample to 16000 Hz (WavLM requirement)
+#    4. Pass through WavLM-Base+ → extract last hidden states
+#    5. Save as utterance-level .npy  shape: [T_a, 1024]
 #
 #  Saves: data/processed/audio_embeddings/Ses01F_impro01_F000.npy
-#         shape: [T_a, 768]   (T_a varies per utterance length)
+#         shape: [T_a, 1024]   (was [T_a, 768] with wav2vec2-base)
 #
-#  Time: ~30–50 min for all sessions on GPU
+#  Downloads: ~700 MB on first run (WavLM-Base+ weights)
+#  Time: ~30–60 min for all sessions on GPU
 #  Run:  python preprocessing\extract_audio.py
 # ============================================================
 
@@ -23,20 +32,20 @@ import os
 import numpy as np
 import torch
 import torchaudio
-from transformers import Wav2Vec2Processor, Wav2Vec2Model
+from transformers import AutoProcessor, AutoModel
 from tqdm import tqdm
 
 RAW_DIR    = "data/raw"
 OUTPUT_DIR = "data/processed/audio_embeddings"
-TARGET_SR  = 16000   # Wav2Vec2 requires 16 kHz
+TARGET_SR  = 16000   # WavLM requires 16 kHz
 
-print("\n  Loading Wav2Vec2-base (downloads ~360MB first time)...")
-processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-wav2vec   = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
-wav2vec.eval()
+print("\n  Loading WavLM-Base+ (Tier 2 upgrade, downloads ~700 MB first time)...")
+processor = AutoProcessor.from_pretrained("microsoft/wavlm-base-plus")
+wavlm     = AutoModel.from_pretrained("microsoft/wavlm-base-plus")
+wavlm.eval()
 
-device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-wav2vec = wav2vec.to(device)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+wavlm  = wavlm.to(device)
 print(f"  Device: {device}")
 
 
@@ -57,7 +66,7 @@ def load_audio(wav_path):
 
 def embed_audio(wav_path):
     """
-    wav_path → numpy array of shape [T_a, 768].
+    wav_path → numpy array of shape [T_a, 1024].  (WavLM-Base+ hidden size)
     Returns None on error.
     """
     try:
@@ -66,7 +75,7 @@ def embed_audio(wav_path):
         print(f"\n  ⚠️  Load error {wav_path}: {e}")
         return None
 
-    # Wav2Vec2Processor normalises the raw waveform
+    # AutoProcessor normalises the raw waveform (same API as Wav2Vec2Processor)
     inputs = processor(
         waveform.numpy(),
         sampling_rate=TARGET_SR,
@@ -75,9 +84,9 @@ def embed_audio(wav_path):
     input_values = inputs.input_values.to(device)   # [1, T]
 
     with torch.no_grad():
-        outputs = wav2vec(input_values)
-        # last_hidden_state: [1, T_a, 768]
-        hidden = outputs.last_hidden_state.squeeze(0)   # [T_a, 768]
+        outputs = wavlm(input_values)
+        # last_hidden_state: [1, T_a, 1024]
+        hidden = outputs.last_hidden_state.squeeze(0)   # [T_a, 1024]
 
     return hidden.cpu().numpy()
 

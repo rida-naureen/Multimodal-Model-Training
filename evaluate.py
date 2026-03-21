@@ -45,7 +45,7 @@ TEXT_DIR   = os.path.join(cfg["data"]["processed_dir"], "text_embeddings")
 AUDIO_DIR  = os.path.join(cfg["data"]["processed_dir"], "audio_embeddings")
 VISUAL_DIR = os.path.join(cfg["data"]["processed_dir"], "visual_embeddings")
 
-test_set = IEMOCAPDataset("test", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR)
+test_set = IEMOCAPDataset("test", SPLITS_DIR, TEXT_DIR, AUDIO_DIR, VISUAL_DIR, cfg=cfg)
 test_loader = DataLoader(
     test_set, batch_size=cfg["training"]["batch_size"],
     shuffle=False, collate_fn=collate_fn, num_workers=0)
@@ -74,7 +74,13 @@ with torch.no_grad():
         a_mask = batch["audio_mask"].to(DEVICE)
         v_mask = batch["visual_mask"].to(DEVICE)
 
-        logits, info = model(text, audio, visual, t_mask, a_mask, v_mask)
+        # Tier 3: conversation context window (optional)
+        ctx_window = batch.get("context_window", None)
+        if ctx_window is not None:
+            ctx_window = ctx_window.to(DEVICE)
+
+        logits, info = model(text, audio, visual, t_mask, a_mask, v_mask,
+                             context_window=ctx_window)
         preds        = logits.argmax(dim=-1)
 
         all_preds.extend(preds.cpu().numpy())

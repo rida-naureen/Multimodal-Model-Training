@@ -16,6 +16,7 @@
 
 import torch.nn as nn
 from models.et_tacfn_fusion import ETTACFNFusion
+from models.conversation_context import ConversationContextModule
 
 
 class EmotionClassifier(nn.Module):
@@ -83,9 +84,25 @@ class MultimodalEmotionModel(nn.Module):
             dropout     = m["dropout"]
         )
 
+        # ── Tier 3: Conversation Context Module (C3 — novel contribution) ──
+        self.use_context = m.get("use_conversation_context", False)
+        if self.use_context:
+            self.context_module = ConversationContextModule(
+                d_model     = m["d_model"],
+                window_size = 5,
+                dropout     = m.get("dropout", 0.1),
+            )
+
     def forward(self, text=None, audio=None, visual=None,
-                text_mask=None, audio_mask=None, visual_mask=None):
+                text_mask=None, audio_mask=None, visual_mask=None,
+                context_window=None):
         """
+        Args:
+            text, audio, visual         : modality feature tensors
+            text_mask, audio_mask, visual_mask : padding masks
+            context_window (optional)   : [B, 5, d_model] — pre-fused window
+                                          embeddings for Tier 3 context module.
+                                          If None, context is skipped.
         Returns:
             logits : [B, num_classes]  raw class scores
             info   : dict of attention weights + confidence scores
@@ -94,5 +111,12 @@ class MultimodalEmotionModel(nn.Module):
             text, audio, visual,
             text_mask, audio_mask, visual_mask
         )
+
+        # ── Tier 3: Conversation Context Enrichment ──────────────
+        # If context window is provided and module is enabled,
+        # enrich the fused embedding with conversational context.
+        if self.use_context and context_window is not None:
+            fused = self.context_module(context_window)
+
         logits = self.classifier(fused)
         return logits, info
