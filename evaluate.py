@@ -2,13 +2,13 @@
 # ============================================================
 #  ET-TACFN Final Evaluation
 #
-#  ⚠️  Run ONCE after training is complete.
+#  Run ONCE after training is complete.
 #
 #  Outputs:
 #    • WA, UA, Macro F1
 #    • Per-class precision / recall / F1
 #    • Confusion matrix PNG
-#    • Confidence scores per modality (ET-TACFN analysis)
+#    • Modality confidence scores PNG
 #    • All saved to logs/
 #
 #  Run:  python evaluate.py
@@ -52,7 +52,7 @@ test_loader = DataLoader(
 
 # ── Load model ────────────────────────────────────────────────
 print(f"\n🤖  Loading ET-TACFN from: {CKPT_PATH}")
-checkpoint = torch.load(CKPT_PATH, map_location=DEVICE, weights_only=False)  # cfg dict needs full unpickling
+checkpoint = torch.load(CKPT_PATH, map_location=DEVICE, weights_only=False)
 model      = MultimodalEmotionModel(cfg).to(DEVICE)
 model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
@@ -74,19 +74,12 @@ with torch.no_grad():
         a_mask = batch["audio_mask"].to(DEVICE)
         v_mask = batch["visual_mask"].to(DEVICE)
 
-        # Tier 3: conversation context window (optional)
-        ctx_window = batch.get("context_window", None)
-        if ctx_window is not None:
-            ctx_window = ctx_window.to(DEVICE)
-
-        logits, info = model(text, audio, visual, t_mask, a_mask, v_mask,
-                             context_window=ctx_window)
+        logits, info = model(text, audio, visual, t_mask, a_mask, v_mask)
         preds        = logits.argmax(dim=-1)
 
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
 
-        # Collect confidence scores (ET-TACFN analysis)
         if "text_conf" in info:
             all_conf_t.extend(info["text_conf"].squeeze(-1).numpy())
             all_conf_a.extend(info["audio_conf"].squeeze(-1).numpy())
@@ -111,7 +104,7 @@ print("\n  Per-class breakdown:")
 print(classification_report(all_labels, all_preds,
                              target_names=EMOTION_NAMES, digits=4))
 
-# ── Confidence Analysis (ET-TACFN specific) ───────────────────
+# ── Modality confidence analysis ─────────────────────────────
 if all_conf_t:
     print("  Average Modality Confidence Scores:")
     print(f"    Text   : {np.mean(all_conf_t):.3f}")
@@ -119,7 +112,7 @@ if all_conf_t:
     print(f"    Visual : {np.mean(all_conf_v):.3f}")
     print("  (Higher = model trusted this modality more on average)")
 
-# ── Confusion Matrix ──────────────────────────────────────────
+# ── Confusion matrix ──────────────────────────────────────────
 cm      = confusion_matrix(all_labels, all_preds)
 cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
 
@@ -146,7 +139,7 @@ cm_path = os.path.join(LOG_DIR, "confusion_matrix.png")
 plt.savefig(cm_path, dpi=150, bbox_inches="tight")
 print(f"\n  📊  Confusion matrix → {cm_path}")
 
-# ── Modality Confidence Plot ──────────────────────────────────
+# ── Modality confidence plot ──────────────────────────────────
 if all_conf_t:
     fig2, ax = plt.subplots(figsize=(8, 4))
     ax.bar(["Text", "Audio", "Visual"],

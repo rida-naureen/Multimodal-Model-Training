@@ -12,42 +12,25 @@ data:
   emotions:      ["hap", "sad", "ang", "neu"]
 
 model:
-  # Shared dimension — increased from 256 to 512 for ET-TACFN
   d_model:          512
-  num_heads:        8        # must divide d_model evenly
+  num_heads:        8          # must divide d_model evenly
   dropout:          0.1
-  num_classes:      4        # happy, sad, angry, neutral
+  num_classes:      4          # happy, sad, angry, neutral
 
-  # Input dims from pretrained encoders
-  # Tier 2 upgrade: roberta-large → 1024-d, WavLM-Base+ → 1024-d
-  text_input_dim:   1024     # RoBERTa-large (was 768 for roberta-base)
-  audio_input_dim:  1024     # WavLM-Base+   (was 768 for wav2vec2-base)
-  visual_input_dim: 256      # ResNet-50 projected (unchanged)
-
-  # ET-TACFN specific settings
-  use_intra_modal_attn:  true   # Contribution 1
-  use_confidence_gate:   true   # Contribution 2
-  use_hierarchical:      true   # Contribution 3
-  use_missing_modality:  true   # Contribution 4
-
-  # Tier 3 — Conversation Context Module (C3 novel contribution)
-  use_conversation_context: true  # BiGRU over 5-utterance window
+  # Input dims — must match your extracted .npy files
+  text_input_dim:   1024       # RoBERTa-large  (extract_text.py)
+  audio_input_dim:  1024       # WavLM-Base+    (extract_audio.py)
+  visual_input_dim: 256        # ResNet-50 → Linear(2048→256)  (extract_visual.py)
 
 training:
   batch_size:         16
-  epochs:             40        # more epochs for fine-tuning
-  lr:                 0.0001    # fusion layers LR
-  encoder_lr:         0.000005  # smaller LR for pretrained encoders
+  epochs:             40
+  lr:                 0.0001
   weight_decay:       0.00001
   patience:           7
-  label_smoothing:    0.1       # prevents overconfidence
-  modality_dropout:   0.20      # Tier 1: 20% (was 0.10) — stronger fusion regularization
-  grad_accum_steps:   4         # accumulate 4 micro-batches → effective batch 64
-  finetune_encoders:  true
-  finetune_layers:    1         # Tier 1: 1 layer (was 2) — reduces speaker overfitting
-  # ── Tier 1: Focal Loss settings ──
-  focal_gamma:        2.0       # standard focal loss concentration parameter
-  sad_weight_mult:    1.5       # boost Sad class weight by 1.5× (recall was 48.6%)
+  label_smoothing:    0.1
+  modality_dropout:   0.15
+  grad_accum_steps:   4
 
 paths:
   checkpoints: "checkpoints/"

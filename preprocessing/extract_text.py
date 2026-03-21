@@ -1,24 +1,17 @@
 # preprocessing/extract_text.py
 # ============================================================
-#  STEP 3A — Extract TEXT features using RoBERTa-large (Tier 2 upgrade)
+#  Extract TEXT features using RoBERTa-large
 #
-#  Tier 2 change: roberta-base (768-d, ~125M params)
-#              →  roberta-large (1024-d, ~355M params)
-#  Expected gain: +4–6 pp UA on IEMOCAP 4-class.
+#  Encoder : roberta-large (~355M params)
+#  Output  : [seq_len, 1024]  per utterance
+#  Saves to: data/processed/text_embeddings/<utt_id>.npy
 #
-#  Reads: dialog/transcriptions/Ses01F_impro01.txt
-#
-#  Transcript file format:
+#  Reads transcript files:
+#    data/raw/SessionX/dialog/transcriptions/*.txt
+#  Format:
 #    Ses01F_impro01_F000 [6.29-8.23]: I had fun.
-#    Ses01F_impro01_M001 [9.10-10.5]: Me too.
 #
-#  Saves: data/processed/text_embeddings/Ses01F_impro01_F000.npy
-#         shape: [seq_len, 1024]   (was 768 with roberta-base)
-#
-#  ⚠️  IMPORTANT: Delete old 768-d .npy files first!
-#      Remove-Item -Recurse -Force data\processed\text_embeddings\*
-#
-#  Downloads: ~1.4 GB on first run (roberta-large weights)
+#  Downloads: ~1.4 GB on first run
 #  Time: ~20–40 min for all sessions on GPU
 #  Run:  python preprocessing\extract_text.py
 # ============================================================
@@ -34,7 +27,7 @@ RAW_DIR    = "data/raw"
 OUTPUT_DIR = "data/processed/text_embeddings"
 MAX_LEN    = 128
 
-print("\n  Loading RoBERTa-large (Tier 2 upgrade, downloads ~1.4 GB first time)...")
+print("\n  Loading RoBERTa-large (downloads ~1.4 GB first time)...")
 tokenizer = RobertaTokenizer.from_pretrained("roberta-large")
 model     = RobertaModel.from_pretrained("roberta-large")
 model.eval()
@@ -45,13 +38,13 @@ print(f"  Device: {device}")
 
 
 def embed_text(text):
-    """text → numpy [seq_len, 1024]  (RoBERTa-large hidden size)"""
+    """text → numpy [seq_len, 1024]"""
     inputs = tokenizer(text, return_tensors="pt", truncation=True,
                        max_length=MAX_LEN, padding="max_length")
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         out = model(**inputs)
-    return out.last_hidden_state.squeeze(0).cpu().numpy()  # [128, 1024]
+    return out.last_hidden_state.squeeze(0).cpu().numpy()  # [MAX_LEN, 1024]
 
 
 def extract_all():

@@ -1,28 +1,24 @@
 # models/classifier.py
 # ============================================================
-#  Full ET-TACFN Model: ETTACFNFusion + EmotionClassifier
-#
-#  This is the ONLY class you import in train.py and evaluate.py.
+#  ET-TACFN Model: ETTACFNFusion + EmotionClassifier
 #
 #  Pipeline:
 #    Text + Audio + Visual
 #        ↓
-#    ETTACFNFusion  (all 4 contributions)
+#    ETTACFNFusion
 #        ↓
-#    EmotionClassifier  (MLP head)
+#    EmotionClassifier  (3-layer MLP head)
 #        ↓
 #    4 emotion logits: Happy / Sad / Angry / Neutral
 # ============================================================
 
 import torch.nn as nn
 from models.et_tacfn_fusion import ETTACFNFusion
-from models.conversation_context import ConversationContextModule
 
 
 class EmotionClassifier(nn.Module):
     """
     3-layer MLP classifier on top of fused features.
-    Deeper than before — matches increased d_model=512.
 
     Input:  [B, d_model]     fused emotion representation
     Output: [B, num_classes] raw logits
@@ -30,18 +26,16 @@ class EmotionClassifier(nn.Module):
 
     def __init__(self, d_model=512, num_classes=4, dropout=0.1):
         super().__init__()
-        # Higher dropout (0.35) in the classifier head prevents overfitting
-        # on IEMOCAP's small dataset (~10k utterances)
         clf_drop = max(dropout, 0.35)
         self.net = nn.Sequential(
-            nn.Linear(d_model, d_model),         # 512 → 512
+            nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
             nn.Dropout(clf_drop),
-            nn.Linear(d_model, d_model // 2),    # 512 → 256
+            nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(clf_drop),
-            nn.Linear(d_model // 2, num_classes) # 256 → 4
+            nn.Linear(d_model // 2, num_classes)
         )
 
     def forward(self, x):
@@ -52,16 +46,11 @@ class MultimodalEmotionModel(nn.Module):
     """
     Complete ET-TACFN model.
 
-    Usage in train.py:
-        model  = MultimodalEmotionModel(cfg)
+    Usage:
+        model = MultimodalEmotionModel(cfg)
         logits, info = model(text, audio, visual,
                              text_mask, audio_mask, visual_mask)
-        loss   = criterion(logits, labels)
-
-    Usage at inference with missing modality:
-        logits, info = model(text=None, audio=audio, visual=visual,
-                             audio_mask=audio_mask, visual_mask=visual_mask)
-        # text replaced automatically with learned fallback
+        loss = criterion(logits, labels)
     """
 
     def __init__(self, cfg):
@@ -84,25 +73,13 @@ class MultimodalEmotionModel(nn.Module):
             dropout     = m["dropout"]
         )
 
-        # ── Tier 3: Conversation Context Module (C3 — novel contribution) ──
-        self.use_context = m.get("use_conversation_context", False)
-        if self.use_context:
-            self.context_module = ConversationContextModule(
-                d_model     = m["d_model"],
-                window_size = 5,
-                dropout     = m.get("dropout", 0.1),
-            )
-
     def forward(self, text=None, audio=None, visual=None,
-                text_mask=None, audio_mask=None, visual_mask=None,
-                context_window=None):
+                text_mask=None, audio_mask=None, visual_mask=None):
         """
         Args:
             text, audio, visual         : modality feature tensors
-            text_mask, audio_mask, visual_mask : padding masks
-            context_window (optional)   : [B, 5, d_model] — pre-fused window
-                                          embeddings for Tier 3 context module.
-                                          If None, context is skipped.
+            text_mask, audio_mask, visual_mask : padding masks (True = padding)
+
         Returns:
             logits : [B, num_classes]  raw class scores
             info   : dict of attention weights + confidence scores
@@ -111,12 +88,5 @@ class MultimodalEmotionModel(nn.Module):
             text, audio, visual,
             text_mask, audio_mask, visual_mask
         )
-
-        # ── Tier 3: Conversation Context Enrichment ──────────────
-        # If context window is provided and module is enabled,
-        # enrich the fused embedding with conversational context.
-        if self.use_context and context_window is not None:
-            fused = self.context_module(context_window)
-
         logits = self.classifier(fused)
         return logits, info

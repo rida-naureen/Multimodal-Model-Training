@@ -1,29 +1,16 @@
 # preprocessing/extract_audio.py
 # ============================================================
-#  STEP 3B — Extract AUDIO features using WavLM-Base+ (Tier 2 upgrade)
+#  Extract AUDIO features using WavLM-Base+
 #
-#  Tier 2 change: facebook/wav2vec2-base-960h (768-d)
-#              →  microsoft/wavlm-base-plus   (1024-d)
-#  WavLM adds masked speech + denoising pretraining for richer prosody.
-#  Expected gain: +3–5 pp UA on IEMOCAP 4-class.
+#  Encoder : microsoft/wavlm-base-plus
+#  Output  : [T_a, 1024]  per utterance  (variable T_a)
+#  Saves to: data/processed/audio_embeddings/<utt_id>.npy
 #
-#  ⚠️  IMPORTANT: Delete old 768-d .npy files first!
-#      Remove-Item -Recurse -Force data\processed\audio_embeddings\*
+#  Reads .wav files:
+#    data/raw/SessionX/sentences/wav/<dialog>/<utt_id>.wav
+#  Resampled to 16 kHz before encoding.
 #
-#  IEMOCAP stores audio per-utterance as .wav files:
-#      Session1/sentences/wav/Ses01F_impro01/Ses01F_impro01_F000.wav
-#
-#  Strategy:
-#    1. Walk all Session*/sentences/wav/ directories
-#    2. Load each .wav with torchaudio
-#    3. Resample to 16000 Hz (WavLM requirement)
-#    4. Pass through WavLM-Base+ → extract last hidden states
-#    5. Save as utterance-level .npy  shape: [T_a, 1024]
-#
-#  Saves: data/processed/audio_embeddings/Ses01F_impro01_F000.npy
-#         shape: [T_a, 1024]   (was [T_a, 768] with wav2vec2-base)
-#
-#  Downloads: ~700 MB on first run (WavLM-Base+ weights)
+#  Downloads: ~700 MB on first run
 #  Time: ~30–60 min for all sessions on GPU
 #  Run:  python preprocessing\extract_audio.py
 # ============================================================
@@ -39,7 +26,7 @@ RAW_DIR    = "data/raw"
 OUTPUT_DIR = "data/processed/audio_embeddings"
 TARGET_SR  = 16000   # WavLM requires 16 kHz
 
-print("\n  Loading WavLM-Base+ (Tier 2 upgrade, downloads ~700 MB first time)...")
+print("\n  Loading WavLM-Base+ (downloads ~700 MB first time)...")
 from transformers import Wav2Vec2FeatureExtractor
 
 processor = Wav2Vec2FeatureExtractor.from_pretrained(
@@ -70,7 +57,7 @@ def load_audio(wav_path):
 
 def embed_audio(wav_path):
     """
-    wav_path → numpy array of shape [T_a, 1024].  (WavLM-Base+ hidden size)
+    wav_path → numpy array of shape [T_a, 1024].
     Returns None on error.
     """
     try:
