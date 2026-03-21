@@ -40,7 +40,11 @@ OUTPUT_DIR = "data/processed/audio_embeddings"
 TARGET_SR  = 16000   # WavLM requires 16 kHz
 
 print("\n  Loading WavLM-Base+ (Tier 2 upgrade, downloads ~700 MB first time)...")
-processor = AutoProcessor.from_pretrained("microsoft/wavlm-base-plus")
+from transformers import Wav2Vec2FeatureExtractor
+
+processor = Wav2Vec2FeatureExtractor.from_pretrained(
+    "microsoft/wavlm-base-plus"
+)
 wavlm     = AutoModel.from_pretrained("microsoft/wavlm-base-plus")
 wavlm.eval()
 
