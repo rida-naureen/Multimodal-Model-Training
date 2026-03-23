@@ -26,16 +26,17 @@ python -c "import torch; print('GPU:', torch.cuda.get_device_name(0) if torch.cu
 > Run **in order**. Each step must complete before the next.
 
 ```powershell
-# Build train / val / test split files  (a few seconds)
+# 1. Build train / val / test split files  (a few seconds)
 python preprocessing\build_dataset.py
 
-# Extract TEXT embeddings  — RoBERTa-base  (~20–30 min)
+# 2. Extract TEXT features — Whisper (STT) + RoBERTa-base (~30–45 min)
+#    Now transcribes directly from .wav files!
 python preprocessing\extract_text.py
 
-# Extract AUDIO embeddings — wav2vec2-base (~30–40 min)
+# 3. Extract AUDIO features — WavLM-base (~30–40 min)
 python preprocessing\extract_audio.py
 
-# Extract VISUAL embeddings — ResNet-50    (~30–40 min)
+# 4. Extract VISUAL features — ResNet-50 (~40–60 min)
 python preprocessing\extract_visual.py
 
 # Optional: sanity check all files are present
@@ -49,9 +50,9 @@ import numpy as np, glob
 t = np.load(glob.glob('data/processed/text_embeddings/*.npy')[0])
 a = np.load(glob.glob('data/processed/audio_embeddings/*.npy')[0])
 v = np.load(glob.glob('data/processed/visual_embeddings/*.npy')[0])
-print('Text  :', t.shape)    # expect (..., 1024)
-print('Audio :', a.shape)    # expect (..., 1024)
-print('Visual:', v.shape)    # expect (30, 256)
+print('Text  :', t.shape)    # expect (768,)
+print('Audio :', a.shape)    # expect (768,)
+print('Visual:', v.shape)    # expect (2048,)
 "
 ```
 
@@ -129,9 +130,9 @@ python evaluate.py
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `text_input_dim` | `1024` | Must match your text `.npy` files (roberta-large output) |
-| `audio_input_dim` | `1024` | Must match your audio `.npy` files (wavlm-base-plus output) |
-| `visual_input_dim` | `256` | ResNet-50 → Linear(2048→256), do not change |
+| `text_input_dim` | `768` | Must match text `.npy` files (RoBERTa-base) |
+| `audio_input_dim` | `768` | Must match audio `.npy` files (WavLM-base) |
+| `visual_input_dim` | `2048` | Must match visual `.npy` files (ResNet-50) |
 | `d_model` | `512` | Shared fusion dimension |
 | `batch_size` | `16` | Lower to `8` if CUDA OOM |
 | `epochs` | `40` | Max training epochs |
@@ -151,8 +152,9 @@ ET-TACFN/
 │
 ├── preprocessing/
 │   ├── build_dataset.py        ← Creates split ID files
-│   ├── extract_text.py         ← RoBERTa-base text features
-│   ├── extract_audio.py        ← wav2vec2-base audio features
+│   ├── encoders.py             ← Centralized singleton encoders  [NEW]
+│   ├── extract_text.py         ← Whisper + RoBERTa features
+│   ├── extract_audio.py        ← WavLM audio features
 │   ├── extract_visual.py       ← ResNet-50 visual features
 │   └── check_data.py           ← Verifies all .npy files exist
 │

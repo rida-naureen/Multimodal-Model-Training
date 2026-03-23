@@ -26,17 +26,9 @@ RAW_DIR    = "data/raw"
 OUTPUT_DIR = "data/processed/audio_embeddings"
 TARGET_SR  = 16000   # WavLM requires 16 kHz
 
-print("\n  Loading WavLM-Base+ (downloads ~700 MB first time)...")
-from transformers import Wav2Vec2FeatureExtractor
-
-processor = Wav2Vec2FeatureExtractor.from_pretrained(
-    "microsoft/wavlm-base-plus"
-)
-wavlm     = AutoModel.from_pretrained("microsoft/wavlm-base-plus")
-wavlm.eval()
+from preprocessing.encoders import get_audio_encoder
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-wavlm  = wavlm.to(device)
 print(f"  Device: {device}")
 
 
@@ -57,7 +49,7 @@ def load_audio(wav_path):
 
 def embed_audio(wav_path):
     """
-    wav_path → numpy array of shape [T_a, 1024].
+    wav_path → numpy array of shape (768,).
     Returns None on error.
     """
     try:
@@ -66,20 +58,10 @@ def embed_audio(wav_path):
         print(f"\n  ⚠️  Load error {wav_path}: {e}")
         return None
 
-    # AutoProcessor normalises the raw waveform (same API as Wav2Vec2Processor)
-    inputs = processor(
-        waveform.numpy(),
-        sampling_rate=TARGET_SR,
-        return_tensors="pt"
-    )
-    input_values = inputs.input_values.to(device)   # [1, T]
-
-    with torch.no_grad():
-        outputs = wavlm(input_values)
-        # last_hidden_state: [1, T_a, 1024]
-        hidden = outputs.last_hidden_state.squeeze(0)   # [T_a, 1024]
-
-    return hidden.cpu().numpy()
+    # Use singleton encoder
+    encoder = get_audio_encoder()
+    emb = encoder.encode(waveform.numpy())
+    return emb
 
 
 def extract_all():

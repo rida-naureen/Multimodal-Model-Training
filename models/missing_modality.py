@@ -50,7 +50,7 @@ class MissingModalityHandler(nn.Module):
 
     def __init__(self, d_model=512,
                  text_dim=768, audio_dim=768, visual_dim=256,
-                 max_text=128, max_audio=300, max_visual=30):
+                 max_text=1, max_audio=1, max_visual=1):
         super().__init__()
         self.max_text   = max_text
         self.max_audio  = max_audio

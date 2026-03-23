@@ -108,7 +108,7 @@ class IEMOCAPDataset(Dataset):
         path = os.path.join(self.visual_dir, f"{uid}.npy")
         if os.path.exists(path):
             return torch.tensor(np.load(path), dtype=torch.float32)
-        return torch.zeros(30, 256, dtype=torch.float32)   # fallback zero tensor
+        return torch.zeros(1, 2048, dtype=torch.float32)   # fallback zero tensor
 
     def __getitem__(self, idx):
         uid = self.utt_ids[idx]

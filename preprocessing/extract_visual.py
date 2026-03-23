@@ -29,19 +29,9 @@ NUM_FRAMES = 30          # frames sampled per utterance
 FEAT_DIM   = 256         # ResNet-50 layer4 avg-pool → 2048, then projected
 
 # ── build ResNet-50 feature extractor ────────────────────────
-print("\n  Building ResNet-50 feature extractor (pretrained ImageNet)...")
-_resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-# Keep everything up to (and including) avgpool, discard the fc layer
-feature_extractor = torch.nn.Sequential(
-    *list(_resnet.children())[:-1],          # → [B, 2048, 1, 1]
-    torch.nn.Flatten(),                       # → [B, 2048]
-    torch.nn.Linear(2048, FEAT_DIM),          # → [B, 256]
-    torch.nn.ReLU(),
-)
-feature_extractor.eval()
+from preprocessing.encoders import get_visual_encoder
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-feature_extractor = feature_extractor.to(device)
 print(f"  Device: {device}")
 
 # ── image pre-processing (ImageNet stats) ─────────────────────
@@ -108,16 +98,14 @@ def sample_frames_from_video(video_path, start_sec, end_sec, n_frames=NUM_FRAMES
 
 def embed_frames(frames):
     """
-    BGR frame list → numpy [n_frames, FEAT_DIM]
+    BGR frame list → numpy (2048,)
     """
-    tensors = []
-    for bgr in frames:
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        tensors.append(preprocess(rgb))
-    batch = torch.stack(tensors).to(device)         # [n_frames, 3, 224, 224]
-    with torch.no_grad():
-        feats = feature_extractor(batch)             # [n_frames, FEAT_DIM]
-    return feats.cpu().numpy()
+    # Convert BGR frames from OpenCV to RGB for the encoder
+    rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames if f is not None]
+    
+    encoder = get_visual_encoder()
+    emb = encoder.encode(rgb_frames)
+    return emb
 
 
 # ── main extraction loop ──────────────────────────────────────
