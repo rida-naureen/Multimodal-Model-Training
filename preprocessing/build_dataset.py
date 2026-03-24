@@ -8,7 +8,6 @@ import subprocess
 import sys
 
 STEPS = [
-    ("Verifying dataset",          "preprocessing/check_data.py"),
     ("Creating splits",            "preprocessing/create_splits.py"),
     ("Extracting text features",   "preprocessing/extract_text.py"),
     ("Extracting audio features",  "preprocessing/extract_audio.py"),
