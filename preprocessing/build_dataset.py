@@ -20,7 +20,11 @@ print("=" * 55)
 
 for i, (desc, script) in enumerate(STEPS, 1):
     print(f"\n[{i}/{len(STEPS)}] {desc}...")
-    result = subprocess.run([sys.executable, script])
+    
+    # Run as a module (python -m preprocessing...) so absolute imports work
+    module_name = script.replace("/", ".").replace(".py", "")
+    result = subprocess.run([sys.executable, "-m", module_name])
+    
     if result.returncode != 0:
         print(f"\n❌ Failed at step {i}: {script}")
         print("   Fix the error above, then re-run this script.")
