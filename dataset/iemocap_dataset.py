@@ -107,7 +107,10 @@ class IEMOCAPDataset(Dataset):
     def _load_visual(self, uid):
         path = os.path.join(self.visual_dir, f"{uid}.npy")
         if os.path.exists(path):
-            return torch.tensor(np.load(path), dtype=torch.float32)
+            vis = torch.tensor(np.load(path), dtype=torch.float32)
+            if vis.dim() == 1:
+                vis = vis.unsqueeze(0)  # Convert (2048,) to (1, 2048)
+            return vis
         return torch.zeros(1, 2048, dtype=torch.float32)   # fallback zero tensor
 
     def __getitem__(self, idx):
@@ -148,7 +151,7 @@ def collate_fn(batch):
 
     texts_padded   = pad_sequence(texts,   batch_first=True)
     audios_padded  = pad_sequence(audios,  batch_first=True)
-    visuals_padded = torch.stack(visuals)
+    visuals_padded = pad_sequence(visuals, batch_first=True)
 
     def make_mask(original_seqs, padded_tensor):
         B, T, _ = padded_tensor.shape
@@ -159,7 +162,7 @@ def collate_fn(batch):
 
     text_mask   = make_mask(texts,  texts_padded)
     audio_mask  = make_mask(audios, audios_padded)
-    visual_mask = torch.zeros(len(batch), visuals_padded.shape[1], dtype=torch.bool)
+    visual_mask = make_mask(visuals, visuals_padded)
 
     return {
         "utt_ids":     utt_ids,
