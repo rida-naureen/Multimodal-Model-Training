@@ -12,9 +12,9 @@ data:
   emotions:      ["hap", "sad", "ang", "neu"]
 
 model:
-  d_model:          512
+  d_model:          256        # reduced from 512 — better fit for ~4k utterances
   num_heads:        8          # must divide d_model evenly
-  dropout:          0.1
+  dropout:          0.3        # increased from 0.1 to fight overfitting
   num_classes:      4          # happy, sad, angry, neutral
 
   # Input dims — must match your extracted .npy files
@@ -24,12 +24,12 @@ model:
 
 training:
   batch_size:         16
-  epochs:             40
+  epochs:             50        # more room to converge now that regularization is stronger
   lr:                 0.0001
-  weight_decay:       0.00001
-  patience:           7
+  weight_decay:       0.00005   # increased from 0.00001 to fight overfitting
+  patience:           10        # increased from 7 to let regularization take effect
   label_smoothing:    0.1
-  modality_dropout:   0.15
+  modality_dropout:   0.2       # increased from 0.15
   grad_accum_steps:   4
 
 paths:
