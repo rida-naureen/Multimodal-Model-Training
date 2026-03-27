@@ -82,12 +82,28 @@ def create_splits():
     test_ids  = [uid for uid in labels if "Ses05" in uid]
     other_ids = [uid for uid in labels if "Ses05" not in uid]
 
-    # Sessions 1–4 → 90% train / 10% val
+    # ── Dialogue-level split (prevents data leakage) ──────────────────────────
+    # Extract unique dialogue IDs (e.g. "Ses01F_impro01") from utterance IDs.
+    # All utterances from the same dialogue must go to the SAME split.
+    # Shuffling dialogues, not individual utterances, eliminates cross-dialogue leakage.
+    from collections import defaultdict
+    dialogue_to_utts = defaultdict(list)
+    for uid in other_ids:
+        # Dialogue ID is everything before the last underscore+speaker+index
+        # e.g. "Ses01F_impro01_F001" → "Ses01F_impro01"
+        dialogue_id = "_".join(uid.split("_")[:-1])
+        dialogue_to_utts[dialogue_id].append(uid)
+
+    dialogue_ids = sorted(dialogue_to_utts.keys())
     random.seed(SEED)
-    random.shuffle(other_ids)
-    n_val     = int(len(other_ids) * VAL_RATIO)
-    val_ids   = other_ids[:n_val]
-    train_ids = other_ids[n_val:]
+    random.shuffle(dialogue_ids)
+
+    n_val_dialogues = max(1, int(len(dialogue_ids) * VAL_RATIO))
+    val_dialogues   = set(dialogue_ids[:n_val_dialogues])
+    train_dialogues = set(dialogue_ids[n_val_dialogues:])
+
+    val_ids   = [uid for d in val_dialogues   for uid in dialogue_to_utts[d]]
+    train_ids = [uid for d in train_dialogues for uid in dialogue_to_utts[d]]
 
     print()
     for name, ids in [("train", train_ids), ("val", val_ids), ("test", test_ids)]:
