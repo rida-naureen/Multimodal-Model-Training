@@ -53,18 +53,19 @@ class AudioEncoder:
     @torch.no_grad()
     def encode(self, audio: np.ndarray) -> np.ndarray:
         """
-        Encode audio to features using WavLM.
-        
+        Encode audio to frame-level features using WavLM.
+
         Args:
             audio: np.ndarray (N,) mono audio @ 16kHz
-        
+
         Returns:
-            np.ndarray: WavLM embedding (768,)
+            np.ndarray: WavLM frame embeddings [T, 768]
+            (variable T depending on audio length)
         """
         # Ensure float32
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
-        
+
         # Feature extraction
         inputs = self.feature_extractor(
             audio,
@@ -72,17 +73,15 @@ class AudioEncoder:
             return_tensors="pt",
             padding=True
         )
-        
+
         input_values = inputs["input_values"].to(self.device)
-        
+
         # Forward pass
         outputs = self.model(input_values)
-        
-        # Mean pooling over time
-        embedding = outputs.last_hidden_state.mean(dim=1)
-        
-        # Return as numpy array
-        return embedding.squeeze(0).cpu().numpy()
+
+        # Return full frame-level sequence [T, 768] — NOT mean-pooled
+        # This preserves temporal structure for the cross-modal attention
+        return outputs.last_hidden_state.squeeze(0).cpu().numpy()
 
 _audio_encoder_instance = None
 
@@ -173,7 +172,7 @@ class SpeechTextPipeline:
     
     @torch.no_grad()
     def encode_text(self, text: str) -> np.ndarray:
-        """Encode text using RoBERTa."""
+        """Encode text using RoBERTa. Returns token-level embeddings [T, 768]."""
         inputs = self.tokenizer(
             text,
             return_tensors="pt",
@@ -181,13 +180,12 @@ class SpeechTextPipeline:
             padding=True,
             max_length=128
         ).to(self.device)
-        
+
         outputs = self.text_model(**inputs)
-        
-        # Mean pooling (requested in prompt)
-        text_embedding = outputs.last_hidden_state.mean(dim=1).squeeze()
-        
-        return text_embedding.cpu().numpy()
+
+        # Return full token-level sequence [T, 768] — NOT mean-pooled
+        # This lets the cross-modal attention attend to individual tokens
+        return outputs.last_hidden_state.squeeze(0).cpu().numpy()
 
 _text_encoder_instance = None
 

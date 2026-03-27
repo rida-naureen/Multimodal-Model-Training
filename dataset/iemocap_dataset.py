@@ -95,14 +95,18 @@ class IEMOCAPDataset(Dataset):
         return len(self.utt_ids)
 
     def _load_text(self, uid):
-        return torch.tensor(
-            np.load(os.path.join(self.text_dir, f"{uid}.npy")),
-            dtype=torch.float32)
+        arr = np.load(os.path.join(self.text_dir, f"{uid}.npy"))
+        t = torch.tensor(arr, dtype=torch.float32)
+        if t.dim() == 1:
+            t = t.unsqueeze(0)  # (768,) → (1, 768)
+        return t
 
     def _load_audio(self, uid):
-        return torch.tensor(
-            np.load(os.path.join(self.audio_dir, f"{uid}.npy")),
-            dtype=torch.float32)
+        arr = np.load(os.path.join(self.audio_dir, f"{uid}.npy"))
+        t = torch.tensor(arr, dtype=torch.float32)
+        if t.dim() == 1:
+            t = t.unsqueeze(0)  # (768,) → (1, 768)
+        return t
 
     def _load_visual(self, uid):
         path = os.path.join(self.visual_dir, f"{uid}.npy")
