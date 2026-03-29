@@ -18,9 +18,9 @@ model:
   num_classes:      4          # happy, sad, angry, neutral
 
   # Input dims — must match your extracted .npy files
-  text_input_dim:   1024       # RoBERTa-large  (old extract_text.py)
-  audio_input_dim:  768        # WavLM-base     (encoders.py)
-  visual_input_dim: 2048       # ResNet-50      (encoders.py)
+  text_input_dim:   768        # RoBERTa-base  (encoders.py) — re-extract text first!
+  audio_input_dim:  768        # WavLM-base    (encoders.py)
+  visual_input_dim: 2048       # ResNet-50     (encoders.py)
 
 training:
   batch_size:         16
